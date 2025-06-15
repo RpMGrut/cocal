@@ -1,3 +1,5 @@
 package me.delyfss.cocal
 
-annotation class Path()
+@Target(AnnotationTarget.PROPERTY)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Path(val value: String)
