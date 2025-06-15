@@ -16,7 +16,6 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-
 tasks.build {
     dependsOn("shadowJar")
 }
@@ -24,6 +23,7 @@ tasks.build {
 tasks.test {
     useJUnitPlatform()
 }
+
 kotlin {
-    jvmToolchain(23)
+    jvmToolchain(17)
 }
