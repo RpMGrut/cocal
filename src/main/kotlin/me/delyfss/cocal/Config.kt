@@ -12,21 +12,25 @@ class Config<T : Any>(
         val file = File(folder, fileName)
         folder.mkdirs()
 
-        val defaultConfig = ConfigFactory.parseString(generateDefaults(target))
-        val existingConfig = if (file.exists()) ConfigFactory.parseFile(file) else ConfigFactory.empty()
-        val merged = defaultConfig.withFallback(existingConfig).resolve()
+        val defaultText = generateDefaults()
+        val defaultConfig = ConfigFactory.parseString(defaultText)
 
-        if (!file.exists()) {
-            file.writeText(defaultConfig.root().render(ConfigRenderOptions.defaults().setComments(true).setOriginComments(false)))
+        val existingConfig = if (file.exists() && file.readText().isBlank()) {
+            try {
+                ConfigFactory.parseFile(file)
+            } catch (e: ConfigException) {
+                ConfigFactory.empty()
+            }
         } else {
-            val mergedText = merged.root().render(ConfigRenderOptions.defaults().setComments(false).setOriginComments(false).setJson(false))
-            file.writeText(mergedText)
+            ConfigFactory.empty()
         }
 
-        for (field in target::class.java.declaredFields) {
-            field.isAccessible = true
-            val path = field.getAnnotation(Path::class.java)?.value ?: continue
+        val merged = existingConfig.withFallback(defaultConfig).resolve()
 
+        for (field in target::class.java.declaredFields) {
+            val annotation = field.getDeclaredAnnotation(Path::class.java) ?: continue
+            val path = annotation.value
+            field.isAccessible = true
             when (field.type) {
                 Boolean::class.javaPrimitiveType -> field.setBoolean(target, merged.getBoolean(path))
                 Int::class.javaPrimitiveType -> field.setInt(target, merged.getInt(path))
@@ -37,22 +41,25 @@ class Config<T : Any>(
             }
         }
 
+        file.writeText(
+            merged.root().render(
+                ConfigRenderOptions.defaults()
+                    .setComments(true)
+                    .setOriginComments(false)
+                    .setJson(false)
+            )
+        )
+
         return target
     }
 
-    private fun generateDefaults(target: T): String {
-        val sb = StringBuilder()
-        for (field in target::class.java.declaredFields) {
-            field.isAccessible = true
-            val path = field.getAnnotation(Path::class.java)?.value ?: continue
-            val value = field.get(target)
-            sb.append("$path = ").append(formatValue(value)).append("\n")
-        }
-        return sb.toString()
-    }
+    private fun generateDefaults(): String =
+        target::class.java.declaredFields.mapNotNull {
+            val ann = it.getDeclaredAnnotation(Path::class.java) ?: return@mapNotNull null
+            it.isAccessible = true
+            "${ann.value} = ${formatValue(it.get(target))}"
+        }.joinToString("\n")
 
-    private fun formatValue(value: Any?): String = when (value) {
-        is String -> "\"$value\""
-        else -> value.toString()
-    }
+    private fun formatValue(value: Any?): String =
+        if (value is String) "\"$value\"" else value.toString()
 }
