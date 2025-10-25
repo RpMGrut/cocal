@@ -12,6 +12,14 @@ A lightweight HOCON-based configuration helper focused on Bukkit/Spigot plugins 
 
 ## Quick start
 
+```kts
+    maven("https://jitpack.io") {
+    name = "jitpack"
+}
+
+implementation("com.github.RpMGrut:cocal:version)
+```
+
 ```kotlin
 import me.delyfss.cocal.Config
 import me.delyfss.cocal.Path
