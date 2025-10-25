@@ -13,11 +13,16 @@ A lightweight HOCON-based configuration helper focused on Bukkit/Spigot plugins 
 ## Quick start
 
 ```kts
+repositories {
+    mavenCentral()
     maven("https://jitpack.io") {
-    name = "jitpack"
+        name = "jitpack"
+    }
 }
 
-implementation("com.github.RpMGrut:cocal:version)
+dependencies {
+    implementation("com.github.RpMGrut:cocal:version")
+}
 ```
 
 ```kotlin
