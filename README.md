@@ -163,3 +163,4 @@ class MessageExample(private val plugin: JavaPlugin) {
 - `sound` accepts a string (`SOUND_NAME`) or an object with `name`, `volume`, `pitch`, and optional `category`.
 - PlaceholderAPI placeholders (`%player_name%`, etc.) and custom `<key>` / `%key%` replacements are expanded automatically before MiniMessage parsing.
 - The library never creates or saves `messages.conf` for you—pass any file/Config supplier via `Messages.fromFile { … }` or your own lambda that loads `Config` however you like.
+- If a message node contains a typo (e.g. `chate` instead of `chat`) or a field has the wrong type, the loader keeps running but logs a warning with the exact path.

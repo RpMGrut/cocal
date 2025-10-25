@@ -110,12 +110,13 @@ class Messages(
 
     private fun parseObject(section: Config, path: String): MessageTemplate {
         val lines = mutableListOf<String>()
-        lines += collectStrings(section, "chat")
-        lines += collectStrings(section, "text")
-        lines += collectStrings(section, "lines")
-        val actionBar = section.getStringOrNull("actionbar", "action-bar")
+        lines += collectStrings(section, "chat", path)
+        lines += collectStrings(section, "text", path)
+        lines += collectStrings(section, "lines", path)
+        val actionBar = section.getStringOrNull(path, "actionbar", "action-bar")
         val titleBar = parseTitleBar(section, path)
         val sound = parseSound(section, path)
+        warnUnknownKeys(section, path)
         return MessageTemplate(lines, actionBar, titleBar, sound)
     }
 
@@ -127,8 +128,8 @@ class Messages(
             ConfigValueType.OBJECT -> {
                 val titleConfig = section.getConfig("titlebar")
                 TitleBar(
-                    title = titleConfig.getStringOrNull("title"),
-                    subtitle = titleConfig.getStringOrNull("subtitle"),
+                    title = titleConfig.getStringOrNull("$path.titlebar", "title"),
+                    subtitle = titleConfig.getStringOrNull("$path.titlebar", "subtitle"),
                     fadeIn = titleConfig.getIntOrDefault(DEFAULT_FADE_IN, "fade-in", "fadeIn"),
                     stay = titleConfig.getIntOrDefault(DEFAULT_STAY, "stay"),
                     fadeOut = titleConfig.getIntOrDefault(DEFAULT_FADE_OUT, "fade-out", "fadeOut")
@@ -148,11 +149,11 @@ class Messages(
             ConfigValueType.STRING -> soundFromString(value.unwrapped().toString(), path)
             ConfigValueType.OBJECT -> {
                 val soundConfig = section.getConfig("sound")
-                val name = soundConfig.getStringOrNull("name", "id")
+                val name = soundConfig.getStringOrNull("$path.sound", "name", "id")
                 soundFromString(name, path)?.copy(
                     volume = soundConfig.getDoubleOrDefault("volume", 1.0).toFloat(),
                     pitch = soundConfig.getDoubleOrDefault("pitch", 1.0).toFloat(),
-                    category = soundConfig.getStringOrNull("category")?.let(::parseSoundCategory)
+                    category = soundConfig.getStringOrNull("$path.sound", "category")?.let(::parseSoundCategory)
                 )
             }
             else -> {
@@ -176,12 +177,23 @@ class Messages(
         }
     }
 
-    private fun collectStrings(section: Config, key: String): List<String> {
+    private fun collectStrings(section: Config, key: String, path: String): List<String> {
         if (!section.hasPath(key)) return emptyList()
         return when (section.getValue(key).valueType()) {
             ConfigValueType.STRING -> listOf(section.getString(key))
             ConfigValueType.LIST -> section.getStringList(key)
-            else -> emptyList()
+            else -> {
+                logger.warning("$path.$key must be a string or string list; value ignored")
+                emptyList()
+            }
+        }
+    }
+
+    private fun warnUnknownKeys(section: Config, path: String) {
+        section.entrySet().forEach { entry ->
+            if (!KNOWN_KEYS.contains(entry.key)) {
+                logger.warning("Unknown message node '$path.${entry.key}' — check for typos like 'chat' vs 'chate'")
+            }
         }
     }
 
@@ -221,9 +233,19 @@ class Messages(
         return Duration.ofMillis(clamped * 50L)
     }
 
-    private fun Config.getStringOrNull(vararg keys: String): String? {
+    private fun Config.getStringOrNull(pathPrefix: String, vararg keys: String): String? {
         keys.forEach { key ->
-            if (hasPath(key)) return getString(key)
+            if (!hasPath(key)) return@forEach
+            val value = getValue(key)
+            return when (value.valueType()) {
+                ConfigValueType.STRING -> getString(key)
+                ConfigValueType.NULL -> null
+                else -> {
+                    val location = if (pathPrefix.isEmpty()) key else "$pathPrefix.$key"
+                    logger.warning("$location must be a string; value ignored")
+                    null
+                }
+            }
         }
         return null
     }
@@ -251,6 +273,7 @@ class Messages(
         private const val DEFAULT_FADE_IN = 10
         private const val DEFAULT_STAY = 70
         private const val DEFAULT_FADE_OUT = 20
+        private val KNOWN_KEYS = setOf("chat", "text", "lines", "actionbar", "action-bar", "titlebar", "sound")
 
         fun fromFile(
             fileProvider: () -> File,
