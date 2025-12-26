@@ -10,16 +10,37 @@ import org.bukkit.SoundCategory
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
 import me.delyfss.cocal.util.FileBackups
+import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
 import java.time.Duration
 import java.util.HashMap
 import java.util.logging.Logger
 
-class Messages(
-    private val configSupplier: () -> Config,
-    private val logger: Logger,
-    private val options: Options = Options()
-) {
+class Messages {
+    private val configSupplier: () -> Config
+    private var logger: Logger? = null
+    private var options: Options = Options()
+    private var plugin: JavaPlugin? = null
+
+    private constructor(configSupplier: () -> Config,
+                logger: Logger,
+                options: Options = Options())
+    {
+        this.configSupplier = configSupplier
+        this.logger = logger
+        this.options = options
+    }
+
+    private constructor(configSupplier: () -> Config,
+                        logger: Logger,
+                        options: Options = Options(),
+                        plugin: JavaPlugin)
+    {
+        this.configSupplier = configSupplier
+        this.logger = logger
+        this.options = options
+        this.plugin = plugin
+    }
 
     data class Options(
         val rootPath: String = "messages",
@@ -135,7 +156,7 @@ class Messages(
                 )
             }
             else -> {
-                logger.warning("Invalid titlebar format at '$path.titlebar'")
+                logger?.warning("Invalid titlebar format at '$path.titlebar'")
                 null
             }
         }
@@ -156,7 +177,7 @@ class Messages(
                 )
             }
             else -> {
-                logger.warning("Unsupported sound node at '$path.sound'")
+                logger?.warning("Unsupported sound node at '$path.sound'")
                 null
             }
         }
@@ -164,14 +185,14 @@ class Messages(
 
     private fun soundFromString(name: String?, path: String): SoundSpec? {
         if (name.isNullOrBlank()) {
-            logger.warning("Sound name missing at '$path.sound'")
+            logger?.warning("Sound name missing at '$path.sound'")
             return null
         }
         return try {
             val sound = Sound.valueOf(name.uppercase())
             SoundSpec(sound, 1f, 1f, null)
         } catch (_: IllegalArgumentException) {
-            logger.warning("Unknown sound '$name' at '$path.sound'")
+            logger?.warning("Unknown sound '$name' at '$path.sound'")
             null
         }
     }
@@ -249,7 +270,7 @@ class Messages(
     private fun parseSoundCategory(name: String): SoundCategory? {
         return runCatching { SoundCategory.valueOf(name.uppercase()) }
             .getOrElse {
-                logger.warning("Unknown sound category '$name'")
+                logger?.warning("Unknown sound category '$name'")
                 null
             }
     }
@@ -259,6 +280,12 @@ class Messages(
         private const val DEFAULT_STAY = 70
         private const val DEFAULT_FADE_OUT = 20
 
+        @Deprecated(
+            message = "This method doesn't support server startup checks. Use the overload with the plugin parameter instead.",
+            replaceWith = ReplaceWith(
+                "Messages.fromFile(plugin, fileProvider, logger, rootPath, sharedPlaceholders, onCorrupted)"
+            ),
+            level = DeprecationLevel.WARNING)
         fun fromFile(
             fileProvider: () -> File,
             logger: Logger,
@@ -268,14 +295,28 @@ class Messages(
         ): Messages {
             val supplier = {
                 val file = fileProvider()
-                loadFromFile(file, logger, onCorrupted)
+                loadFromFile(file, onCorrupted)
             }
             return Messages(supplier, logger, Options(rootPath, sharedPlaceholders))
         }
 
+        fun fromFile(
+            plugin: JavaPlugin,
+            fileProvider: () -> File,
+            logger: Logger,
+            rootPath: String = "messages",
+            sharedPlaceholders: Map<String, String> = emptyMap(),
+            onCorrupted: ((File, Exception) -> String?)? = null
+        ): Messages {
+            val supplier = {
+                val file = fileProvider()
+                loadFromFile(file, onCorrupted)
+            }
+            return Messages(supplier, logger, Options(rootPath, sharedPlaceholders), plugin)
+        }
+
         private fun loadFromFile(
             file: File,
-            logger: Logger,
             onCorrupted: ((File, Exception) -> String?)?
         ): Config {
             if (!file.exists()) {
