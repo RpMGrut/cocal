@@ -2,6 +2,7 @@ package me.delyfss.cocal.message
 
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
+import com.typesafe.config.ConfigRenderOptions
 import com.typesafe.config.ConfigValueType
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.title.Title
@@ -12,6 +13,7 @@ import org.bukkit.entity.Player
 import me.delyfss.cocal.util.FileBackups
 import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.HashMap
 import java.util.logging.Logger
@@ -40,6 +42,39 @@ class Messages {
         this.logger = logger
         this.options = options
         this.plugin = plugin
+    }
+
+    fun ensureDefaults(file: File, defaultPath: String? = null) {
+        val userConfig = ConfigFactory.parseFile(file)
+
+        val path = defaultPath
+            ?: file.path
+                .replace('\\', '/').split("/")
+                .drop(2).joinToString("/")
+
+        val defaultConfig = try {
+            val stream = plugin?.getResource(path)
+            if (stream == null) {
+                logger?.warning("Resource $path not found in jar, skipping default config")
+                ConfigFactory.empty()
+            } else {
+                stream.use { ConfigFactory.parseReader(it.reader()) }
+            }
+        } catch (e: Exception) {
+            logger?.severe("${e.message}. Error while modifying configs.")
+            return
+        }
+
+        val merged = userConfig.withFallback(defaultConfig).resolve()
+
+        file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
+            val options = ConfigRenderOptions.defaults()
+                .setOriginComments(false)
+                .setJson(false)
+                .setFormatted(true)
+
+            writer.write(merged.root().render(options))
+        }
     }
 
     data class Options(
