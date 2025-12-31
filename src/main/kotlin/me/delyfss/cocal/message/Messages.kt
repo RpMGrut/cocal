@@ -18,62 +18,60 @@ import java.time.Duration
 import java.util.HashMap
 import java.util.logging.Logger
 
-class Messages {
-    private val configSupplier: () -> Config
-    private var logger: Logger? = null
-    private var options: Options = Options()
-    private var plugin: JavaPlugin? = null
-
-    private constructor(configSupplier: () -> Config,
-                logger: Logger,
-                options: Options = Options())
-    {
-        this.configSupplier = configSupplier
-        this.logger = logger
-        this.options = options
-    }
-
-    private constructor(configSupplier: () -> Config,
-                        logger: Logger,
-                        options: Options = Options(),
-                        plugin: JavaPlugin)
-    {
-        this.configSupplier = configSupplier
-        this.logger = logger
-        this.options = options
-        this.plugin = plugin
-    }
+class Messages(
+    private val configSupplier: () -> Config,
+    private val logger: Logger,
+    private val options: Options = Options(),
+    private val plugin: JavaPlugin? = null
+) {
 
     fun ensureDefaults(file: File, defaultPath: String? = null) {
-        val userConfig = ConfigFactory.parseFile(file)
-
-        val path = defaultPath
-            ?: file.path
-                .replace('\\', '/').split("/")
-                .drop(2).joinToString("/")
-
-        val defaultConfig = try {
-            val stream = plugin?.getResource(path)
-            if (stream == null) {
-                logger?.warning("Resource $path not found in jar, skipping default config")
-                ConfigFactory.empty()
-            } else {
-                stream.use { ConfigFactory.parseReader(it.reader()) }
-            }
+        if (plugin == null) {
+            logger.warning("ensureDefaults requires a plugin instance to read default resources")
+            return
+        }
+        val userConfig = try {
+            ConfigFactory.parseFile(file)
         } catch (e: Exception) {
-            logger?.severe("${e.message}. Error while modifying configs.")
+            val contents = runCatching { file.readText() }.getOrNull()
+            FileBackups.backup(file, contents)
+            logger.severe("${e.message}. Error while reading user config.")
             return
         }
 
-        val merged = userConfig.withFallback(defaultConfig).resolve()
+        val path = defaultPath ?: runCatching {
+            plugin.dataFolder.toPath()
+                .relativize(file.toPath())
+                .toString()
+                .replace('\\', '/')
+        }.getOrNull()
+
+        if (path.isNullOrBlank()) {
+            logger.warning("Unable to resolve default resource path for ${file.path}. Provide defaultPath explicitly.")
+            return
+        }
+
+        val stream = plugin.getResource(path)
+        if (stream == null) {
+            logger.warning("Resource $path not found in jar, skipping default config")
+            return
+        }
+
+        val defaultConfig = try {
+            stream.use { ConfigFactory.parseReader(it.reader(StandardCharsets.UTF_8)) }
+        } catch (e: Exception) {
+            logger.severe("${e.message}. Error while reading default config.")
+            return
+        }
 
         file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
-            val options = ConfigRenderOptions.defaults()
+            val renderOptions = ConfigRenderOptions.defaults()
                 .setOriginComments(false)
                 .setJson(false)
                 .setFormatted(true)
 
-            writer.write(merged.root().render(options))
+            val merged = userConfig.withFallback(defaultConfig).resolve()
+            writer.write(merged.root().render(renderOptions))
         }
     }
 
@@ -191,7 +189,7 @@ class Messages {
                 )
             }
             else -> {
-                logger?.warning("Invalid titlebar format at '$path.titlebar'")
+                logger.warning("Invalid titlebar format at '$path.titlebar'")
                 null
             }
         }
@@ -212,7 +210,7 @@ class Messages {
                 )
             }
             else -> {
-                logger?.warning("Unsupported sound node at '$path.sound'")
+                logger.warning("Unsupported sound node at '$path.sound'")
                 null
             }
         }
@@ -220,14 +218,14 @@ class Messages {
 
     private fun soundFromString(name: String?, path: String): SoundSpec? {
         if (name.isNullOrBlank()) {
-            logger?.warning("Sound name missing at '$path.sound'")
+            logger.warning("Sound name missing at '$path.sound'")
             return null
         }
         return try {
             val sound = Sound.valueOf(name.uppercase())
             SoundSpec(sound, 1f, 1f, null)
         } catch (_: IllegalArgumentException) {
-            logger?.warning("Unknown sound '$name' at '$path.sound'")
+            logger.warning("Unknown sound '$name' at '$path.sound'")
             null
         }
     }
@@ -305,7 +303,7 @@ class Messages {
     private fun parseSoundCategory(name: String): SoundCategory? {
         return runCatching { SoundCategory.valueOf(name.uppercase()) }
             .getOrElse {
-                logger?.warning("Unknown sound category '$name'")
+                logger.warning("Unknown sound category '$name'")
                 null
             }
     }
