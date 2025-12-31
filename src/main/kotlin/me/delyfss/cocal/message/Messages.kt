@@ -2,6 +2,7 @@ package me.delyfss.cocal.message
 
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
+import com.typesafe.config.ConfigRenderOptions
 import com.typesafe.config.ConfigValueType
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.title.Title
@@ -10,7 +11,9 @@ import org.bukkit.SoundCategory
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
 import me.delyfss.cocal.util.FileBackups
+import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.HashMap
 import java.util.logging.Logger
@@ -18,8 +21,59 @@ import java.util.logging.Logger
 class Messages(
     private val configSupplier: () -> Config,
     private val logger: Logger,
-    private val options: Options = Options()
+    private val options: Options = Options(),
+    private val plugin: JavaPlugin? = null
 ) {
+
+    fun ensureDefaults(file: File, defaultPath: String? = null) {
+        if (plugin == null) {
+            logger.warning("ensureDefaults requires a plugin instance to read default resources")
+            return
+        }
+        val userConfig = try {
+            ConfigFactory.parseFile(file)
+        } catch (e: Exception) {
+            val contents = runCatching { file.readText() }.getOrNull()
+            FileBackups.backup(file, contents)
+            logger.severe("${e.message}. Error while reading user config.")
+            return
+        }
+
+        val path = defaultPath ?: runCatching {
+            plugin.dataFolder.toPath()
+                .relativize(file.toPath())
+                .toString()
+                .replace('\\', '/')
+        }.getOrNull()
+
+        if (path.isNullOrBlank()) {
+            logger.warning("Unable to resolve default resource path for ${file.path}. Provide defaultPath explicitly.")
+            return
+        }
+
+        val stream = plugin.getResource(path)
+        if (stream == null) {
+            logger.warning("Resource $path not found in jar, skipping default config")
+            return
+        }
+
+        val defaultConfig = try {
+            stream.use { ConfigFactory.parseReader(it.reader(StandardCharsets.UTF_8)) }
+        } catch (e: Exception) {
+            logger.severe("${e.message}. Error while reading default config.")
+            return
+        }
+
+        file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
+            val renderOptions = ConfigRenderOptions.defaults()
+                .setOriginComments(false)
+                .setJson(false)
+                .setFormatted(true)
+
+            val merged = userConfig.withFallback(defaultConfig).resolve()
+            writer.write(merged.root().render(renderOptions))
+        }
+    }
 
     data class Options(
         val rootPath: String = "messages",
@@ -259,6 +313,12 @@ class Messages(
         private const val DEFAULT_STAY = 70
         private const val DEFAULT_FADE_OUT = 20
 
+        @Deprecated(
+            message = "This method doesn't support server startup checks. Use the overload with the plugin parameter instead.",
+            replaceWith = ReplaceWith(
+                "Messages.fromFile(plugin, fileProvider, logger, rootPath, sharedPlaceholders, onCorrupted)"
+            ),
+            level = DeprecationLevel.WARNING)
         fun fromFile(
             fileProvider: () -> File,
             logger: Logger,
@@ -268,14 +328,28 @@ class Messages(
         ): Messages {
             val supplier = {
                 val file = fileProvider()
-                loadFromFile(file, logger, onCorrupted)
+                loadFromFile(file, onCorrupted)
             }
             return Messages(supplier, logger, Options(rootPath, sharedPlaceholders))
         }
 
+        fun fromFile(
+            plugin: JavaPlugin,
+            fileProvider: () -> File,
+            logger: Logger,
+            rootPath: String = "messages",
+            sharedPlaceholders: Map<String, String> = emptyMap(),
+            onCorrupted: ((File, Exception) -> String?)? = null
+        ): Messages {
+            val supplier = {
+                val file = fileProvider()
+                loadFromFile(file, onCorrupted)
+            }
+            return Messages(supplier, logger, Options(rootPath, sharedPlaceholders), plugin)
+        }
+
         private fun loadFromFile(
             file: File,
-            logger: Logger,
             onCorrupted: ((File, Exception) -> String?)?
         ): Config {
             if (!file.exists()) {
