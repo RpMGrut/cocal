@@ -40,7 +40,7 @@ class Messages(
         }
 
         val path = defaultPath ?: runCatching {
-            plugin.dataFolder.toPath()
+            plugin?.dataFolder.toPath()
                 .relativize(file.toPath())
                 .toString()
                 .replace('\\', '/')
