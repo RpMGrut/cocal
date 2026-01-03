@@ -40,8 +40,8 @@ class Messages(
         }
 
         val path = defaultPath ?: runCatching {
-            plugin.dataFolder.toPath()
-                .relativize(file.toPath())
+            plugin?.dataFolder?.toPath()
+                ?.relativize(file.toPath())
                 .toString()
                 .replace('\\', '/')
         }.getOrNull()
@@ -51,7 +51,7 @@ class Messages(
             return
         }
 
-        val stream = plugin.getResource(path)
+        val stream = plugin?.getResource(path)
         if (stream == null) {
             logger.warning("Resource $path not found in jar, skipping default config")
             return
