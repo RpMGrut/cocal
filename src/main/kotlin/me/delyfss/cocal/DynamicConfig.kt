@@ -39,9 +39,9 @@ abstract class DynamicConfig(
     }
 
     @Synchronized
-    fun update(block: () -> Unit) {
+    fun update(block: DynamicConfig.() -> Unit) {
         try {
-            block()
+            this.block()
             scheduleSaveLocked()
         } catch (e: Exception) {
             throw IllegalStateException("Failed to update config: $fileName", e)
