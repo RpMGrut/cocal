@@ -98,6 +98,30 @@ val loader = Config(
 - `prettyPrint` — toggles HOCON formatting
 - `alwaysWriteFile` — if `true` (default) the merged file is re-rendered every load just like the legacy behaviour
 
+## Dynamic config (auto-save)
+
+`DynamicConfig` lets you keep a mutable Kotlin config object that auto-saves to disk with debounce.
+
+```kotlin
+class MenuStateConfig(folder: File) : DynamicConfig(folder, "menu-state.conf") {
+    @Path("last-opened")
+    var lastOpened: Long = 0L
+    var tabs: MutableList<String> = mutableListOf()
+}
+
+val state = MenuStateConfig(plugin.dataFolder)
+
+state.update {
+    lastOpened = System.currentTimeMillis()
+    tabs.add("main")
+}
+```
+
+Notes:
+- All mutations must happen inside `update { ... }` so saves are synchronized.
+- Call `close()` on plugin disable to stop the scheduler thread.
+- `@Path` can be placed on a property, getter (`@get:Path`) or field (`@field:Path`).
+
 ## Legacy field models
 
 Older usage still works:
@@ -152,6 +176,7 @@ Usage:
 ```kotlin
 class MessageExample(private val plugin: JavaPlugin) {
     private val messages = Messages.fromFile(
+        plugin = plugin,
         fileProvider = { File(plugin.dataFolder, "messages.conf") },
         logger = plugin.logger,
         rootPath = "messages",
@@ -163,6 +188,10 @@ class MessageExample(private val plugin: JavaPlugin) {
     )
 
     fun init() = messages.load()
+    fun ensureDefaults() {
+        // Merges missing keys from the bundled resource into the file
+        messages.ensureDefaults(File(plugin.dataFolder, "messages.conf"))
+    }
 
     fun notifyCooldown(player: Player, seconds: Int) {
         messages.send(player, "ability.cooldown", mapOf("time" to seconds.toString()))
