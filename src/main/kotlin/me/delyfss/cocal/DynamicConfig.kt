@@ -38,16 +38,6 @@ abstract class DynamicConfig(
             .onEach { it.isAccessible = true }
     }
 
-    @Synchronized
-    fun update(block: DynamicConfig.() -> Unit) {
-        try {
-            this.block()
-            scheduleSaveLocked()
-        } catch (e: Exception) {
-            throw IllegalStateException("Failed to update config: $fileName", e)
-        }
-    }
-
     fun scheduleSave() {
         synchronized(this) {
             scheduleSaveLocked()
@@ -168,7 +158,7 @@ abstract class DynamicConfig(
         scheduler.shutdown()
     }
 
-    private fun scheduleSaveLocked() {
+    internal fun scheduleSaveLocked() {
         if (closed) return
         saveTask?.cancel(false)
         saveTask = scheduler.schedule({ save() }, options.debounceDelayMs, TimeUnit.MILLISECONDS)
@@ -178,5 +168,16 @@ abstract class DynamicConfig(
         return prop.findAnnotation<Path>()
             ?: prop.getter.findAnnotation<Path>()
             ?: prop.javaField?.getAnnotation(Path::class.java)
+    }
+}
+
+fun <T : DynamicConfig> T.update(block: T.() -> Unit) {
+    synchronized(this) {
+        try {
+            this.block()
+            this.scheduleSaveLocked()
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to update config: $fileName", e)
+        }
     }
 }
