@@ -3,9 +3,9 @@ package me.delyfss.cocal
 import com.typesafe.config.Config as TypesafeConfig
 import com.typesafe.config.ConfigException
 import com.typesafe.config.ConfigFactory
-import com.typesafe.config.ConfigRenderOptions
 import com.typesafe.config.ConfigValueType
 import java.io.File
+import me.delyfss.cocal.internal.ConfigTextRenderer
 import me.delyfss.cocal.util.FileBackups
 import kotlin.reflect.KClass
 import kotlin.reflect.KParameter
@@ -28,12 +28,16 @@ class Config<T : Any>(
     data class Options(
         val header: List<String> = emptyList(),
         val prettyPrint: Boolean = true,
-        val alwaysWriteFile: Boolean = true
+        val alwaysWriteFile: Boolean = true,
+        val commentsEnabled: Boolean = true,
+        val commentPrefix: String = "# "
     )
 
     private data class Blueprint(
         val tree: LinkedHashMap<String, Any?>,
-        val dynamicSections: Set<String>
+        val dynamicSections: Set<String>,
+        val keyComments: Map<String, List<String>>,
+        val sectionComments: Map<String, List<String>>
     )
 
     fun load(): T {
@@ -50,7 +54,7 @@ class Config<T : Any>(
 
         val blueprint = buildDataBlueprint(prototype)
         val defaultConfig = ConfigFactory.parseMap(blueprint.tree)
-        val defaultText = renderConfig(defaultConfig)
+        val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
 
         val existing = readConfigFile(file, defaultText)
         var merged = existing.withFallback(defaultConfig).resolve()
@@ -74,7 +78,7 @@ class Config<T : Any>(
 
         val blueprint = buildLegacyBlueprint()
         val defaultConfig = ConfigFactory.parseMap(blueprint.tree)
-        val defaultText = renderConfig(defaultConfig)
+        val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
 
         val existing = readConfigFile(file, defaultText)
         var merged = existing.withFallback(defaultConfig).resolve()
@@ -125,13 +129,8 @@ class Config<T : Any>(
 
     private fun writeOrderedConfig(file: File, blueprint: Blueprint, merged: TypesafeConfig) {
         if (!options.alwaysWriteFile && file.exists()) return
-        val ordered = createOrderedConfig(blueprint, merged)
-        file.writeText(renderConfig(ordered))
-    }
-
-    private fun createOrderedConfig(blueprint: Blueprint, merged: TypesafeConfig): TypesafeConfig {
         val orderedMap = buildOrderedMap(blueprint.tree, merged, "", blueprint.dynamicSections)
-        return ConfigFactory.parseMap(orderedMap)
+        file.writeText(renderConfig(orderedMap, blueprint.keyComments, blueprint.sectionComments))
     }
 
     private fun buildOrderedMap(
@@ -203,6 +202,16 @@ class Config<T : Any>(
             val property = properties[param.name]
                 ?: error("No property found for parameter ${param.name} in ${klass.simpleName}")
             val path = resolvePath(prefix, property, param)
+            if (!config.hasPath(path)) {
+                when {
+                    param.isOptional -> return@forEach
+                    param.type.isMarkedNullable -> {
+                        params[param] = null
+                        return@forEach
+                    }
+                }
+            }
+
             val value = readValue(param.type, config, path)
             params[param] = value
         }
@@ -324,33 +333,42 @@ class Config<T : Any>(
     private fun buildDataBlueprint(instance: Any): Blueprint {
         val tree = linkedMapOf<String, Any?>()
         val dynamic = linkedSetOf<String>()
-        collectDefaults(instance, emptyList(), tree, dynamic)
-        return Blueprint(tree, dynamic)
+        val keyComments = linkedMapOf<String, List<String>>()
+        val sectionComments = linkedMapOf<String, List<String>>()
+        collectDefaults(instance, emptyList(), tree, dynamic, keyComments, sectionComments)
+        return Blueprint(tree, dynamic, keyComments, sectionComments)
     }
 
     private fun buildLegacyBlueprint(): Blueprint {
         val tree = linkedMapOf<String, Any?>()
         val dynamic = linkedSetOf<String>()
+        val keyComments = linkedMapOf<String, List<String>>()
+        val sectionComments = linkedMapOf<String, List<String>>()
         prototype::class.java.declaredFields.forEach { field ->
             val annotation = field.getDeclaredAnnotation(Path::class.java) ?: return@forEach
             val segments = annotation.value.split('.').filter { it.isNotBlank() }
+            val joinedPath = segments.joinToString(".")
+            fieldComments(field)?.let { comments -> keyComments.putIfAbsent(joinedPath, comments) }
+            fieldSectionComments(field)?.let { comments -> sectionComments.putIfAbsent(joinedPath, comments) }
             field.isAccessible = true
             val value = field.get(prototype)
             if (value != null && value::class.isData) {
-                collectDefaults(value, segments, tree, dynamic)
+                collectDefaults(value, segments, tree, dynamic, keyComments, sectionComments)
             } else {
-                val converted = convertValue(value, segments, dynamic)
+                val converted = convertValue(value, segments, dynamic, keyComments, sectionComments)
                 insertValue(tree, segments, converted)
             }
         }
-        return Blueprint(tree, dynamic)
+        return Blueprint(tree, dynamic, keyComments, sectionComments)
     }
 
     private fun collectDefaults(
         instance: Any,
         prefix: List<String>,
         result: MutableMap<String, Any?>,
-        dynamicSections: MutableSet<String>
+        dynamicSections: MutableSet<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
     ) {
         val klass = instance::class
         val ctor = klass.primaryConstructor
@@ -362,6 +380,9 @@ class Config<T : Any>(
                 ?: error("No property found for parameter ${param.name} in ${klass.simpleName}")
             val path = propertyPath(param, property).split('.').filter { it.isNotBlank() }
             val segments = prefix + path
+            val joinedPath = segments.joinToString(".")
+            propertyComment(param, property)?.let { comments -> keyComments.putIfAbsent(joinedPath, comments) }
+            propertySectionComment(param, property)?.let { comments -> sectionComments.putIfAbsent(joinedPath, comments) }
             property.isAccessible = true
             val value = property.getter.call(instance)
             val typeErasure = property.returnType.jvmErasure
@@ -372,9 +393,9 @@ class Config<T : Any>(
             }
 
             if (value != null && value::class.isData) {
-                collectDefaults(value, segments, result, dynamicSections)
+                collectDefaults(value, segments, result, dynamicSections, keyComments, sectionComments)
             } else {
-                val converted = convertValue(value, segments, dynamicSections)
+                val converted = convertValue(value, segments, dynamicSections, keyComments, sectionComments)
                 insertValue(result, segments, converted)
             }
         }
@@ -383,48 +404,60 @@ class Config<T : Any>(
     private fun convertValue(
         value: Any?,
         path: List<String>,
-        dynamicSections: MutableSet<String>
+        dynamicSections: MutableSet<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
     ): Any? = when (value) {
         null -> null
         is String, is Number, is Boolean -> value
         is Enum<*> -> value.name
-        is List<*> -> value.map { convertCollectionValue(it, dynamicSections) }
-        is Set<*> -> value.map { convertCollectionValue(it, dynamicSections) }
+        is List<*> -> value.map { convertCollectionValue(it, dynamicSections, keyComments, sectionComments) }
+        is Set<*> -> value.map { convertCollectionValue(it, dynamicSections, keyComments, sectionComments) }
         is Map<*, *> -> {
             val fullPath = path.joinToString(".")
             if (fullPath.isNotBlank()) {
                 dynamicSections.add(fullPath)
             }
             value.entries.associate { (key, entryValue) ->
-                key.toString() to convertCollectionValue(entryValue, dynamicSections)
+                key.toString() to convertCollectionValue(entryValue, dynamicSections, keyComments, sectionComments)
             }
         }
         else -> if (value::class.isData) {
-            snapshotDataClass(value, dynamicSections)
+            snapshotDataClass(value, dynamicSections, keyComments, sectionComments)
         } else {
             value.toString()
         }
     }
 
-    private fun convertCollectionValue(value: Any?, dynamicSections: MutableSet<String>): Any? = when (value) {
+    private fun convertCollectionValue(
+        value: Any?,
+        dynamicSections: MutableSet<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
+    ): Any? = when (value) {
         null -> null
         is String, is Number, is Boolean -> value
         is Enum<*> -> value.name
-        is List<*> -> value.map { convertCollectionValue(it, dynamicSections) }
-        is Set<*> -> value.map { convertCollectionValue(it, dynamicSections) }
+        is List<*> -> value.map { convertCollectionValue(it, dynamicSections, keyComments, sectionComments) }
+        is Set<*> -> value.map { convertCollectionValue(it, dynamicSections, keyComments, sectionComments) }
         is Map<*, *> -> value.entries.associate { (key, entryValue) ->
-            key.toString() to convertCollectionValue(entryValue, dynamicSections)
+            key.toString() to convertCollectionValue(entryValue, dynamicSections, keyComments, sectionComments)
         }
         else -> if (value::class.isData) {
-            snapshotDataClass(value, dynamicSections)
+            snapshotDataClass(value, dynamicSections, keyComments, sectionComments)
         } else {
             value.toString()
         }
     }
 
-    private fun snapshotDataClass(value: Any, dynamicSections: MutableSet<String>): Map<String, Any?> {
+    private fun snapshotDataClass(
+        value: Any,
+        dynamicSections: MutableSet<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
+    ): Map<String, Any?> {
         val nested = linkedMapOf<String, Any?>()
-        collectDefaults(value, emptyList(), nested, dynamicSections)
+        collectDefaults(value, emptyList(), nested, dynamicSections, keyComments, sectionComments)
         return nested
     }
 
@@ -445,25 +478,48 @@ class Config<T : Any>(
         cursor[path.last()] = rawValue
     }
 
-    private fun renderConfig(config: TypesafeConfig): String {
-        val renderOptions = ConfigRenderOptions.defaults()
-            .setComments(false)
-            .setOriginComments(false)
-            .setJson(false)
-            .setFormatted(options.prettyPrint)
+    private fun renderConfig(
+        tree: Map<String, Any?>,
+        keyComments: Map<String, List<String>>,
+        sectionComments: Map<String, List<String>>
+    ): String {
+        return ConfigTextRenderer.render(
+            root = tree,
+            options = ConfigTextRenderer.Options(
+                header = options.header,
+                prettyPrint = options.prettyPrint,
+                commentsEnabled = options.commentsEnabled,
+                commentPrefix = options.commentPrefix
+            ),
+            keyComments = keyComments,
+            sectionComments = sectionComments
+        )
+    }
 
-        val rendered = config.root().render(renderOptions)
-        if (options.header.isEmpty()) {
-            return rendered
-        }
-        val header = options.header.joinToString(separator = "\n") { line ->
-            if (line.startsWith("#")) line else "# $line"
-        }
-        return buildString {
-            appendLine(header)
-            appendLine()
-            append(rendered)
-        }
+    private fun propertyComment(parameter: KParameter, property: KProperty1<*, *>): List<String>? {
+        val raw = parameter.findAnnotation<Comment>()?.value
+            ?: property.findAnnotation<Comment>()?.value
+            ?: property.javaField?.getAnnotation(Comment::class.java)?.value
+        return sanitizeComments(raw)
+    }
+
+    private fun propertySectionComment(parameter: KParameter, property: KProperty1<*, *>): List<String>? {
+        val raw = parameter.findAnnotation<SectionComment>()?.value
+            ?: property.findAnnotation<SectionComment>()?.value
+            ?: property.javaField?.getAnnotation(SectionComment::class.java)?.value
+        return sanitizeComments(raw)
+    }
+
+    private fun fieldComments(field: java.lang.reflect.Field): List<String>? =
+        sanitizeComments(field.getDeclaredAnnotation(Comment::class.java)?.value)
+
+    private fun fieldSectionComments(field: java.lang.reflect.Field): List<String>? =
+        sanitizeComments(field.getDeclaredAnnotation(SectionComment::class.java)?.value)
+
+    private fun sanitizeComments(lines: Array<out String>?): List<String>? {
+        if (lines == null) return null
+        val normalized = lines.map { it.trimEnd() }
+        return normalized.takeIf { it.isNotEmpty() }
     }
 
     private fun appendPath(prefix: String, key: String): String {

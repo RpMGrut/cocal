@@ -3,6 +3,7 @@ import com.typesafe.config.ConfigFactory
 import me.delyfss.cocal.Config
 import me.delyfss.cocal.Path
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
@@ -33,6 +34,21 @@ class ConfigTest {
             "pvp" to BossBar(text = "<red>PvP soon"),
             "nether" to BossBar(enabled = false, text = "<blue>Nether locked")
         )
+    )
+
+    data class PenetrationRule(
+        val groups: List<String> = emptyList(),
+        @Path("include-materials")
+        val includeMaterials: List<String> = emptyList(),
+        @Path("material-name-contains")
+        val materialNameContains: List<String> = emptyList(),
+        @Path("block-behavior")
+        val blockBehavior: String = "break"
+    )
+
+    data class PenetrationProfile(
+        val enabled: Boolean = true,
+        val rules: List<PenetrationRule> = emptyList()
     )
 
     class LegacyConfig {
@@ -150,5 +166,37 @@ class ConfigTest {
         val loaded = loader.load()
         assertEquals("default", loaded.value)
         assertTrue(File(tempDir, "legacy.conf").exists())
+    }
+
+    @Test
+    fun `missing optional fields inside list data objects use constructor defaults`() {
+        val file = File(tempDir, "profile.conf")
+        val original = """
+            enabled = true
+            rules = [
+              {
+                groups = ["GLASS"]
+                include-materials = []
+              }
+            ]
+        """.trimIndent()
+        file.writeText(original)
+
+        val loader = Config(
+            tempDir,
+            "profile.conf",
+            PenetrationProfile(),
+            Config.Options(alwaysWriteFile = false)
+        )
+        val loaded = loader.load()
+
+        assertTrue(loaded.enabled)
+        assertEquals(1, loaded.rules.size)
+        assertEquals(listOf("GLASS"), loaded.rules.first().groups)
+        assertEquals(emptyList<String>(), loaded.rules.first().materialNameContains)
+        assertEquals("break", loaded.rules.first().blockBehavior)
+        assertEquals(original, file.readText())
+        val backupExists = tempDir.listFiles()?.any { it.name.startsWith("profilesave-") } ?: false
+        assertFalse(backupExists)
     }
 }

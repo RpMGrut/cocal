@@ -5,7 +5,7 @@ plugins {
 
 group = "me.delyfss"
 val envVersion = System.getenv("VERSION")?.takeIf { it.isNotBlank() }
-version = envVersion ?: "1.2-SNAPSHOT"
+version = envVersion ?: "1.3-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -25,6 +25,7 @@ dependencies {
     compileOnly("me.clip:placeholderapi:2.11.6")
 
     testImplementation(kotlin("test"))
+    testImplementation("io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT")
 }
 
 tasks.build {

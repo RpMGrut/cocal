@@ -1,16 +1,14 @@
 package me.delyfss.cocal
 
-import com.typesafe.config.Config
-import com.typesafe.config.ConfigFactory
-import com.typesafe.config.ConfigRenderOptions
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.reflect.full.findAnnotation
-import kotlin.reflect.full.declaredMemberProperties
-import kotlin.reflect.jvm.isAccessible
 import kotlin.collections.linkedMapOf
+import kotlin.reflect.full.declaredMemberProperties
+import kotlin.reflect.full.findAnnotation
+import kotlin.reflect.jvm.isAccessible
 import kotlin.reflect.jvm.javaField
+import me.delyfss.cocal.internal.ConfigTextRenderer
 
 abstract class DynamicConfig(
     val folder: File,
@@ -21,7 +19,15 @@ abstract class DynamicConfig(
     data class Options(
         val header: List<String> = emptyList(),
         val prettyPrint: Boolean = true,
-        val debounceDelayMs: Long = 1000L
+        val debounceDelayMs: Long = 1000L,
+        val commentsEnabled: Boolean = true,
+        val commentPrefix: String = "# "
+    )
+
+    private data class Blueprint(
+        val tree: Map<String, Any?>,
+        val keyComments: Map<String, List<String>>,
+        val sectionComments: Map<String, List<String>>
     )
 
     private val scheduler = Executors.newSingleThreadScheduledExecutor { run ->
@@ -49,45 +55,94 @@ abstract class DynamicConfig(
         if (closed) return
         folder.mkdirs()
         val file = File(folder, fileName)
-        file.writeText(renderConfig(buildCurrentConfig()))
+        val blueprint = buildCurrentBlueprint()
+        file.writeText(renderConfig(blueprint))
     }
 
-    private fun buildCurrentConfig(): Config {
+    private fun buildCurrentBlueprint(): Blueprint {
         val tree = linkedMapOf<String, Any?>()
+        val keyComments = linkedMapOf<String, List<String>>()
+        val sectionComments = linkedMapOf<String, List<String>>()
+
         properties.forEach { prop ->
-            val path = pathAnnotation(prop)?.value ?: prop.name
+            val segments = (pathAnnotation(prop)?.value ?: prop.name)
+                .split('.')
+                .filter { it.isNotBlank() }
+            val path = segments.joinToString(".")
+
+            propertyComment(prop)?.let { comments -> keyComments.putIfAbsent(path, comments) }
+            propertySectionComment(prop)?.let { comments -> sectionComments.putIfAbsent(path, comments) }
+
             val value = prop.getter.call(this)
-            insertValue(tree, path.split('.').filter { it.isNotBlank() }, convertValue(value))
+            if (value != null && value::class.isData) {
+                collectCurrent(value, segments, tree, keyComments, sectionComments)
+            } else {
+                insertValue(tree, segments, convertValue(value, segments, keyComments, sectionComments))
+            }
         }
-        return ConfigFactory.parseMap(tree)
+
+        return Blueprint(tree, keyComments, sectionComments)
     }
 
-    private fun convertValue(value: Any?): Any? = when (value) {
+    private fun convertValue(
+        value: Any?,
+        path: List<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
+    ): Any? = when (value) {
         null -> null
         is String, is Number, is Boolean -> value
         is Enum<*> -> value.name
-        is List<*> -> value.map { convertValue(it) }
-        is Set<*> -> value.map { convertValue(it) }
+        is List<*> -> value.map { convertCollectionValue(it, path, keyComments, sectionComments) }
+        is Set<*> -> value.map { convertCollectionValue(it, path, keyComments, sectionComments) }
         is Map<*, *> -> value.entries.associate { (key, entryValue) ->
-            key.toString() to convertValue(entryValue)
+            key.toString() to convertCollectionValue(entryValue, path, keyComments, sectionComments)
         }
         else -> if (value::class.isData) {
-            snapshotDataClass(value)
+            snapshotDataClass(value, path, keyComments, sectionComments)
         } else {
             value.toString()
         }
     }
 
-    private fun snapshotDataClass(value: Any): Map<String, Any?> {
+    private fun convertCollectionValue(
+        value: Any?,
+        path: List<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
+    ): Any? = when (value) {
+        null -> null
+        is String, is Number, is Boolean -> value
+        is Enum<*> -> value.name
+        is List<*> -> value.map { convertCollectionValue(it, path, keyComments, sectionComments) }
+        is Set<*> -> value.map { convertCollectionValue(it, path, keyComments, sectionComments) }
+        is Map<*, *> -> value.entries.associate { (key, entryValue) ->
+            key.toString() to convertCollectionValue(entryValue, path, keyComments, sectionComments)
+        }
+        else -> if (value::class.isData) {
+            snapshotDataClass(value, path, keyComments, sectionComments)
+        } else {
+            value.toString()
+        }
+    }
+
+    private fun snapshotDataClass(
+        value: Any,
+        prefix: List<String>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
+    ): Map<String, Any?> {
         val nested = linkedMapOf<String, Any?>()
-        collectCurrent(value, emptyList(), nested)
+        collectCurrent(value, prefix, nested, keyComments, sectionComments)
         return nested
     }
 
     private fun collectCurrent(
         instance: Any,
         prefix: List<String>,
-        result: MutableMap<String, Any?>
+        result: MutableMap<String, Any?>,
+        keyComments: MutableMap<String, List<String>>,
+        sectionComments: MutableMap<String, List<String>>
     ) {
         val klass = instance::class
         val properties = klass.declaredMemberProperties
@@ -95,22 +150,29 @@ abstract class DynamicConfig(
             .onEach { it.isAccessible = true }
 
         properties.forEach { prop ->
-            val pathSegments = (prefix + (pathAnnotation(prop)?.value ?: prop.name)
+            val pathSegments = prefix + (pathAnnotation(prop)?.value ?: prop.name)
                 .split('.')
-                .filter { it.isNotBlank() })
+                .filter { it.isNotBlank() }
+            val joinedPath = pathSegments.joinToString(".")
+            propertyComment(prop)?.let { comments -> keyComments.putIfAbsent(joinedPath, comments) }
+            propertySectionComment(prop)?.let { comments -> sectionComments.putIfAbsent(joinedPath, comments) }
 
             when (val value = prop.getter.call(instance)) {
                 null -> insertValue(result, pathSegments, null)
                 is Map<*, *> -> {
                     val convertedMap = value.entries.associate { (k, v) ->
-                        k.toString() to convertValue(v)
+                        k.toString() to convertValue(v, pathSegments, keyComments, sectionComments)
                     }
                     insertValue(result, pathSegments, convertedMap)
                 }
                 else -> if (value::class.isData) {
-                    collectCurrent(value, pathSegments, result)
+                    collectCurrent(value, pathSegments, result, keyComments, sectionComments)
                 } else {
-                    insertValue(result, pathSegments, convertValue(value))
+                    insertValue(
+                        result,
+                        pathSegments,
+                        convertValue(value, pathSegments, keyComments, sectionComments)
+                    )
                 }
             }
         }
@@ -136,18 +198,18 @@ abstract class DynamicConfig(
         cursor[path.last()] = rawValue
     }
 
-    private fun renderConfig(config: Config): String {
-        val renderOptions = ConfigRenderOptions.defaults()
-            .setComments(false)
-            .setOriginComments(false)
-            .setJson(false)
-            .setFormatted(options.prettyPrint)
-
-        val rendered = config.root().render(renderOptions)
-        if (options.header.isEmpty()) return rendered
-
-        val header = options.header.joinToString("\n") { if (it.startsWith("#")) it else "# $it" }
-        return "$header\n\n$rendered"
+    private fun renderConfig(blueprint: Blueprint): String {
+        return ConfigTextRenderer.render(
+            root = blueprint.tree,
+            options = ConfigTextRenderer.Options(
+                header = options.header,
+                prettyPrint = options.prettyPrint,
+                commentsEnabled = options.commentsEnabled,
+                commentPrefix = options.commentPrefix
+            ),
+            keyComments = blueprint.keyComments,
+            sectionComments = blueprint.sectionComments
+        )
     }
 
     @Synchronized
@@ -168,6 +230,26 @@ abstract class DynamicConfig(
         return prop.findAnnotation<Path>()
             ?: prop.getter.findAnnotation<Path>()
             ?: prop.javaField?.getAnnotation(Path::class.java)
+    }
+
+    private fun propertyComment(prop: kotlin.reflect.KProperty1<*, *>): List<String>? {
+        val raw = prop.findAnnotation<Comment>()?.value
+            ?: prop.getter.findAnnotation<Comment>()?.value
+            ?: prop.javaField?.getAnnotation(Comment::class.java)?.value
+        return sanitizeComments(raw)
+    }
+
+    private fun propertySectionComment(prop: kotlin.reflect.KProperty1<*, *>): List<String>? {
+        val raw = prop.findAnnotation<SectionComment>()?.value
+            ?: prop.getter.findAnnotation<SectionComment>()?.value
+            ?: prop.javaField?.getAnnotation(SectionComment::class.java)?.value
+        return sanitizeComments(raw)
+    }
+
+    private fun sanitizeComments(lines: Array<out String>?): List<String>? {
+        if (lines == null) return null
+        val normalized = lines.map { it.trimEnd() }
+        return normalized.takeIf { it.isNotEmpty() }
     }
 }
 
