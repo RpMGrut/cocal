@@ -254,7 +254,17 @@ If a locale file has syntax/type errors:
 
 ### Config parse/type issues
 
-`Config` and `DynamicConfig` follow the same backup strategy (`*save-...conf`) when recovery is possible.
+`Config` now recovers invalid values selectively:
+
+- only the invalid path is rolled back to its default value
+- warning contains file, line, path, bad value preview, and recovery action
+- other valid user overrides stay untouched
+
+Backups (`*save-...conf`) are created only for global recovery scenarios (for example syntax corruption or unrecoverable type errors).
+
+Special case for dynamic maps:
+
+- if a custom map entry has an invalid value and no default exists for that exact path, `Config` performs a global backup/reset
 
 ## Legacy mutable field models
 

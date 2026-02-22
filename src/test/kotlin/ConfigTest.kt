@@ -9,6 +9,10 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.logging.Handler
+import java.util.logging.Level
+import java.util.logging.LogRecord
+import java.util.logging.Logger
 
 class ConfigTest {
 
@@ -138,26 +142,126 @@ class ConfigTest {
 
         val updated = file.readText()
         assertTrue(updated.contains("countdown-seconds"))
-        val backupExists = tempDir.listFiles()?.any { it.name.startsWith("examplesave-") } ?: false
-        assertTrue(backupExists)
+        assertTrue(backupFiles("examplesave-").isNotEmpty())
     }
 
     @Test
-    fun `type mismatch regenerates config`() {
+    fun `type mismatch rolls back only invalid path and keeps overrides`() {
         val file = File(tempDir, "example.conf")
         file.writeText(
             """
             enabled = "nope"
+            tool {
+              material = "DIAMOND_AXE"
+            }
             """.trimIndent()
         )
 
         val loaded = Config(tempDir, "example.conf", ExampleConfig()).load()
 
         assertEquals(false, loaded.enabled)
-        val resetText = file.readText()
-        assertTrue(resetText.contains("boss-bars"))
-        val backups = tempDir.listFiles()?.filter { it.name.startsWith("examplesave-") } ?: emptyList()
-        assertTrue(backups.isNotEmpty())
+        assertEquals("DIAMOND_AXE", loaded.tool.material)
+        assertTrue(file.readText().contains("material = \"DIAMOND_AXE\""))
+        assertTrue(backupFiles("examplesave-").isEmpty())
+    }
+
+    @Test
+    fun `multiple invalid values are fixed without global backup`() {
+        val file = File(tempDir, "example.conf")
+        file.writeText(
+            """
+            enabled = "nope"
+            countdown-seconds = ["a", "b"]
+            tool {
+              material = "DIAMOND_AXE"
+              display-name = "Custom"
+              lore = [{ bad = 1 }]
+            }
+            """.trimIndent()
+        )
+
+        val loaded = Config(tempDir, "example.conf", ExampleConfig()).load()
+
+        assertEquals(false, loaded.enabled)
+        assertEquals(listOf(5, 4, 3, 2, 1), loaded.countdownSeconds)
+        assertEquals("DIAMOND_AXE", loaded.tool.material)
+        assertEquals("Custom", loaded.tool.displayName)
+        assertEquals(listOf("<gray>Line 1", "<gray>Line 2"), loaded.tool.lore)
+
+        val text = file.readText()
+        assertTrue(text.contains("material = \"DIAMOND_AXE\""))
+        assertTrue(text.contains("display-name = \"Custom\""))
+        assertTrue(backupFiles("examplesave-").isEmpty())
+    }
+
+    @Test
+    fun `warning includes file line path and bad value`() {
+        val file = File(tempDir, "example.conf")
+        file.writeText("enabled = \"nope\"")
+
+        val warnings = captureConfigWarnings {
+            Config(tempDir, "example.conf", ExampleConfig()).load()
+        }
+
+        val relevant = warnings.firstOrNull { it.contains("path='enabled'") }
+        assertTrue(relevant != null)
+        assertTrue(relevant!!.contains("line=1"))
+        assertTrue(relevant.contains("value='nope'"))
+        assertTrue(relevant.contains("action='roll back to default'"))
+    }
+
+    @Test
+    fun `alwaysWriteFile false still writes after selective rollback`() {
+        val file = File(tempDir, "example.conf")
+        val original = """
+            enabled = "nope"
+            tool {
+              material = "DIAMOND_AXE"
+            }
+        """.trimIndent()
+        file.writeText(original)
+
+        val loaded = Config(
+            tempDir,
+            "example.conf",
+            ExampleConfig(),
+            Config.Options(alwaysWriteFile = false)
+        ).load()
+
+        assertEquals(false, loaded.enabled)
+        assertEquals("DIAMOND_AXE", loaded.tool.material)
+        val written = file.readText()
+        assertTrue(written != original)
+        assertTrue(written.contains("enabled = false"))
+        assertTrue(written.contains("material = \"DIAMOND_AXE\""))
+        assertTrue(backupFiles("examplesave-").isEmpty())
+    }
+
+    @Test
+    fun `dynamic map key without default triggers global backup reset`() {
+        val file = File(tempDir, "example.conf")
+        file.writeText(
+            """
+            enabled = true
+            tool {
+              material = "DIAMOND_AXE"
+            }
+            boss-bars {
+              custom {
+                enabled = "nope"
+                text = "Custom"
+              }
+            }
+            """.trimIndent()
+        )
+
+        val loaded = Config(tempDir, "example.conf", ExampleConfig()).load()
+
+        assertEquals(false, loaded.enabled)
+        assertEquals("STONE_AXE", loaded.tool.material)
+        assertFalse(loaded.bossBars.containsKey("custom"))
+        assertFalse(file.readText().contains("custom"))
+        assertTrue(backupFiles("examplesave-").isNotEmpty())
     }
 
     @Test
@@ -198,5 +302,41 @@ class ConfigTest {
         assertEquals(original, file.readText())
         val backupExists = tempDir.listFiles()?.any { it.name.startsWith("profilesave-") } ?: false
         assertFalse(backupExists)
+    }
+
+    private fun backupFiles(prefix: String): List<File> {
+        return tempDir.listFiles()
+            ?.filter { it.name.startsWith(prefix) }
+            ?: emptyList()
+    }
+
+    private fun captureConfigWarnings(block: () -> Unit): List<String> {
+        val logger = Logger.getLogger(Config::class.java.name)
+        val messages = mutableListOf<String>()
+        val handler = object : Handler() {
+            override fun publish(record: LogRecord) {
+                messages += record.message
+            }
+
+            override fun flush() = Unit
+
+            override fun close() = Unit
+        }
+
+        val previousLevel = logger.level
+        val previousUseParentHandlers = logger.useParentHandlers
+
+        logger.level = Level.ALL
+        logger.useParentHandlers = false
+        logger.addHandler(handler)
+
+        return try {
+            block()
+            messages
+        } finally {
+            logger.removeHandler(handler)
+            logger.level = previousLevel
+            logger.useParentHandlers = previousUseParentHandlers
+        }
     }
 }

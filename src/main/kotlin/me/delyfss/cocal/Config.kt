@@ -5,6 +5,7 @@ import com.typesafe.config.ConfigException
 import com.typesafe.config.ConfigFactory
 import com.typesafe.config.ConfigValueType
 import java.io.File
+import java.util.logging.Logger
 import me.delyfss.cocal.internal.ConfigTextRenderer
 import me.delyfss.cocal.util.FileBackups
 import kotlin.reflect.KClass
@@ -40,6 +41,28 @@ class Config<T : Any>(
         val sectionComments: Map<String, List<String>>
     )
 
+    private data class RecoveryResult<R>(
+        val loaded: R,
+        val merged: TypesafeConfig,
+        val hasSelectiveFixes: Boolean
+    )
+
+    private enum class RecoveryAction {
+        SELECTIVE_ROLLBACK,
+        GLOBAL_RESET
+    }
+
+    private class InvalidConfigValueException(
+        val displayPath: String,
+        val recoveryPath: String,
+        val reason: String,
+        val lineNumber: Int?,
+        val invalidValuePreview: String?,
+        cause: Throwable? = null
+    ) : RuntimeException(reason, cause)
+
+    private val logger: Logger = Logger.getLogger(Config::class.java.name)
+
     fun load(): T {
         return if (prototype::class.isData) {
             loadDataClass()
@@ -57,19 +80,19 @@ class Config<T : Any>(
         val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
 
         val existing = readConfigFile(file, defaultText)
-        var merged = existing.withFallback(defaultConfig).resolve()
-
         val klass = prototype::class as KClass<T>
-        val result = try {
-            instantiateDataClass(klass, merged, "")
-        } catch (ex: Exception) {
-            restoreFromInvalidValues(file, defaultText, ex)
-            merged = ConfigFactory.parseFile(file).withFallback(defaultConfig).resolve()
-            instantiateDataClass(klass, merged, "")
+
+        val recovery = loadWithRecovery(file, defaultText, defaultConfig, existing) { merged ->
+            instantiateDataClass(klass, merged)
         }
 
-        writeOrderedConfig(file, blueprint, merged)
-        return result
+        writeOrderedConfig(
+            file = file,
+            blueprint = blueprint,
+            merged = recovery.merged,
+            forceWrite = recovery.hasSelectiveFixes
+        )
+        return recovery.loaded
     }
 
     private fun loadLegacyObject(): T {
@@ -81,18 +104,98 @@ class Config<T : Any>(
         val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
 
         val existing = readConfigFile(file, defaultText)
-        var merged = existing.withFallback(defaultConfig).resolve()
 
-        try {
+        val recovery = loadWithRecovery(file, defaultText, defaultConfig, existing) { merged ->
             assignLegacyFields(merged)
-        } catch (ex: Exception) {
-            restoreFromInvalidValues(file, defaultText, ex)
-            merged = ConfigFactory.parseFile(file).withFallback(defaultConfig).resolve()
-            assignLegacyFields(merged)
+            prototype
         }
 
-        writeOrderedConfig(file, blueprint, merged)
-        return prototype
+        writeOrderedConfig(
+            file = file,
+            blueprint = blueprint,
+            merged = recovery.merged,
+            forceWrite = recovery.hasSelectiveFixes
+        )
+        return recovery.loaded
+    }
+
+    private inline fun <R> loadWithRecovery(
+        file: File,
+        defaultText: String,
+        defaultConfig: TypesafeConfig,
+        existing: TypesafeConfig,
+        instantiate: (TypesafeConfig) -> R
+    ): RecoveryResult<R> {
+        var current = existing
+        var merged = current.withFallback(defaultConfig).resolve()
+        var hasSelectiveFixes = false
+        var attempts = 0
+
+        while (true) {
+            try {
+                val loaded = instantiate(merged)
+                return RecoveryResult(loaded, merged, hasSelectiveFixes)
+            } catch (invalid: InvalidConfigValueException) {
+                attempts += 1
+                when (decideRecoveryAction(invalid, defaultConfig, attempts)) {
+                    RecoveryAction.SELECTIVE_ROLLBACK -> {
+                        logInvalidValue(
+                            file = file,
+                            issue = invalid,
+                            action = "roll back to default"
+                        )
+                        current = current.withValue(invalid.recoveryPath, defaultConfig.getValue(invalid.recoveryPath))
+                        merged = current.withFallback(defaultConfig).resolve()
+                        hasSelectiveFixes = true
+                    }
+
+                    RecoveryAction.GLOBAL_RESET -> {
+                        logInvalidValue(
+                            file = file,
+                            issue = invalid,
+                            action = "global reset with backup"
+                        )
+                        restoreFromInvalidValues(file, defaultText, invalid)
+                        merged = ConfigFactory.parseFile(file).withFallback(defaultConfig).resolve()
+                        val loaded = instantiate(merged)
+                        return RecoveryResult(loaded, merged, true)
+                    }
+                }
+            } catch (ex: Exception) {
+                restoreFromInvalidValues(file, defaultText, ex)
+                merged = ConfigFactory.parseFile(file).withFallback(defaultConfig).resolve()
+                val loaded = instantiate(merged)
+                return RecoveryResult(loaded, merged, true)
+            }
+        }
+    }
+
+    private fun decideRecoveryAction(
+        invalid: InvalidConfigValueException,
+        defaultConfig: TypesafeConfig,
+        attempts: Int
+    ): RecoveryAction {
+        if (attempts > MAX_RECOVERY_ATTEMPTS) {
+            return RecoveryAction.GLOBAL_RESET
+        }
+        val recoveryPath = invalid.recoveryPath
+        if (recoveryPath.isBlank()) {
+            return RecoveryAction.GLOBAL_RESET
+        }
+        val hasDefault = runCatching { defaultConfig.hasPath(recoveryPath) }
+            .getOrDefault(false)
+        if (!hasDefault) {
+            return RecoveryAction.GLOBAL_RESET
+        }
+        return RecoveryAction.SELECTIVE_ROLLBACK
+    }
+
+    private fun logInvalidValue(file: File, issue: InvalidConfigValueException, action: String) {
+        val line = issue.lineNumber?.toString() ?: "unknown"
+        val value = issue.invalidValuePreview ?: "<unavailable>"
+        logger.warning(
+            "Invalid config value: file='${file.absolutePath}', line=$line, path='${issue.displayPath}', value='$value', reason='${issue.reason}', action='$action'"
+        )
     }
 
     private fun readConfigFile(file: File, defaultText: String): TypesafeConfig {
@@ -127,8 +230,13 @@ class Config<T : Any>(
         file.writeText(defaultText)
     }
 
-    private fun writeOrderedConfig(file: File, blueprint: Blueprint, merged: TypesafeConfig) {
-        if (!options.alwaysWriteFile && file.exists()) return
+    private fun writeOrderedConfig(
+        file: File,
+        blueprint: Blueprint,
+        merged: TypesafeConfig,
+        forceWrite: Boolean
+    ) {
+        if (!forceWrite && !options.alwaysWriteFile && file.exists()) return
         val orderedMap = buildOrderedMap(blueprint.tree, merged, "", blueprint.dynamicSections)
         file.writeText(renderConfig(orderedMap, blueprint.keyComments, blueprint.sectionComments))
     }
@@ -148,6 +256,7 @@ class Config<T : Any>(
                     @Suppress("UNCHECKED_CAST")
                     buildOrderedMap(value as Map<String, Any?>, source, path, dynamicSections)
                 }
+
                 else -> readOrDefault(source, path, value)
             }
             result[key] = resolvedValue
@@ -181,11 +290,10 @@ class Config<T : Any>(
 
     private fun instantiateDataClass(
         klass: KClass<*>,
-        config: TypesafeConfig,
-        prefix: String
+        config: TypesafeConfig
     ): T {
         @Suppress("UNCHECKED_CAST")
-        return instantiateAnyDataClass(klass, config, prefix) as T
+        return instantiateAnyDataClass(klass, config, "") as T
     }
 
     private fun instantiateAnyDataClass(
@@ -222,20 +330,32 @@ class Config<T : Any>(
     private fun readValue(type: KType, config: TypesafeConfig, path: String): Any? {
         val erasure = type.jvmErasure
         return when {
-            erasure == String::class -> config.getString(path)
-            erasure == Int::class -> config.getInt(path)
-            erasure == Long::class -> config.getLong(path)
-            erasure == Double::class -> config.getDouble(path)
-            erasure == Float::class -> config.getDouble(path).toFloat()
-            erasure == Boolean::class -> config.getBoolean(path)
-            erasure.java.isEnum -> readEnum(enumClass(erasure), config.getString(path))
+            erasure == String::class -> readTyped(config, path, "STRING") { config.getString(path) }
+            erasure == Int::class -> readTyped(config, path, "INT") { config.getInt(path) }
+            erasure == Long::class -> readTyped(config, path, "LONG") { config.getLong(path) }
+            erasure == Double::class -> readTyped(config, path, "DOUBLE") { config.getDouble(path) }
+            erasure == Float::class -> readTyped(config, path, "FLOAT") { config.getDouble(path).toFloat() }
+            erasure == Boolean::class -> readTyped(config, path, "BOOLEAN") { config.getBoolean(path) }
+            erasure.java.isEnum -> {
+                val raw = readTyped(config, path, "STRING") { config.getString(path) }
+                readEnum(enumClass(erasure), raw, config, path)
+            }
+
             erasure == List::class -> readList(type, config, path)
             erasure == MutableList::class -> readList(type, config, path).toMutableList()
             erasure == Set::class -> readList(type, config, path).toSet()
             erasure == MutableSet::class -> readList(type, config, path).toMutableSet()
             erasure == Map::class -> readMap(type, config, path)
             erasure == MutableMap::class -> readMap(type, config, path).toMutableMap()
-            erasure.isData -> instantiateAnyDataClass(erasure, config.getConfig(path), "")
+            erasure.isData -> {
+                val child = readTyped(config, path, "OBJECT") { config.getConfig(path) }
+                try {
+                    instantiateAnyDataClass(erasure, child, "")
+                } catch (ex: InvalidConfigValueException) {
+                    throw prependInvalidPath(ex, path)
+                }
+            }
+
             else -> error("Unsupported config type '$erasure' at path '$path'")
         }
     }
@@ -245,13 +365,30 @@ class Config<T : Any>(
             ?: error("List type at '$path' must specify generic parameter")
         val erasure = elementType.jvmErasure
         return when {
-            erasure == String::class -> config.getStringList(path)
-            erasure == Int::class -> config.getIntList(path)
-            erasure == Long::class -> config.getLongList(path)
-            erasure == Double::class -> config.getDoubleList(path)
-            erasure == Boolean::class -> config.getBooleanList(path)
-            erasure.java.isEnum -> config.getStringList(path).map { readEnum(enumClass(erasure), it) }
-            erasure.isData -> config.getConfigList(path).map { instantiateAnyDataClass(erasure, it, "") }
+            erasure == String::class -> readTyped(config, path, "LIST<STRING>") { config.getStringList(path) }
+            erasure == Int::class -> readTyped(config, path, "LIST<INT>") { config.getIntList(path) }
+            erasure == Long::class -> readTyped(config, path, "LIST<LONG>") { config.getLongList(path) }
+            erasure == Double::class -> readTyped(config, path, "LIST<DOUBLE>") { config.getDoubleList(path) }
+            erasure == Boolean::class -> readTyped(config, path, "LIST<BOOLEAN>") { config.getBooleanList(path) }
+            erasure.java.isEnum -> {
+                readTyped(config, path, "LIST<STRING>") { config.getStringList(path) }
+                    .map { raw -> readEnum(enumClass(erasure), raw, config, path) }
+            }
+
+            erasure.isData -> {
+                val entries = readTyped(config, path, "LIST<OBJECT>") { config.getConfigList(path) }
+                entries.mapIndexed { index, entry ->
+                    try {
+                        instantiateAnyDataClass(erasure, entry, "")
+                    } catch (ex: InvalidConfigValueException) {
+                        val localPath = if (ex.displayPath.isBlank()) "entry" else ex.displayPath
+                        val displayPath = "$path[$index].$localPath"
+                        val line = ex.lineNumber ?: sanitizeLine(entry.root().origin().lineNumber())
+                        throw remapInvalidPath(ex, displayPath = displayPath, recoveryPath = path, lineNumber = line)
+                    }
+                }
+            }
+
             else -> error("Unsupported list element type '$erasure' at path '$path'")
         }
     }
@@ -262,7 +399,7 @@ class Config<T : Any>(
         require(keyType == String::class) { "Only String map keys are supported at path '$path'" }
         val valueType = type.arguments.getOrNull(1)?.type
             ?: error("Map value type missing at path '$path'")
-        val section = config.getConfig(path)
+        val section = readTyped(config, path, "OBJECT") { config.getConfig(path) }
         val keys = section.root().keys
         val result = linkedMapOf<String, Any?>()
         keys.forEach { key ->
@@ -272,18 +409,126 @@ class Config<T : Any>(
         return result
     }
 
-    private fun readEnum(enumClass: Class<out Enum<*>>, raw: String): Enum<*> {
+    private fun readEnum(
+        enumClass: Class<out Enum<*>>,
+        raw: String,
+        config: TypesafeConfig,
+        path: String
+    ): Enum<*> {
         return try {
             java.lang.Enum.valueOf(enumClass, raw.uppercase())
         } catch (_: IllegalArgumentException) {
             val allowed = enumClass.enumConstants.joinToString(", ") { it.name }
-            error("Invalid value '$raw' for enum ${enumClass.simpleName}. Allowed: $allowed")
+            throw invalidConfigValue(
+                config = config,
+                displayPath = path,
+                recoveryPath = path,
+                reason = "Invalid enum value '$raw' for ${enumClass.simpleName}. Allowed: $allowed",
+                rawValueOverride = raw
+            )
         }
     }
 
     @Suppress("UNCHECKED_CAST")
     private fun enumClass(erasure: KClass<*>): Class<out Enum<*>> {
         return erasure.java as Class<out Enum<*>>
+    }
+
+    private inline fun <R> readTyped(
+        config: TypesafeConfig,
+        path: String,
+        expectedType: String,
+        block: () -> R
+    ): R {
+        return try {
+            block()
+        } catch (ex: InvalidConfigValueException) {
+            throw ex
+        } catch (ex: ConfigException) {
+            throw invalidConfigValue(
+                config = config,
+                displayPath = path,
+                recoveryPath = path,
+                reason = ex.message ?: "Expected $expectedType at '$path'",
+                cause = ex
+            )
+        }
+    }
+
+    private fun invalidConfigValue(
+        config: TypesafeConfig,
+        displayPath: String,
+        recoveryPath: String,
+        reason: String,
+        cause: Throwable? = null,
+        lineNumberOverride: Int? = null,
+        rawValueOverride: Any? = null
+    ): InvalidConfigValueException {
+        val line = lineNumberOverride
+            ?: extractLineNumber(config, recoveryPath)
+            ?: (cause as? ConfigException)?.origin()?.lineNumber()?.let(::sanitizeLine)
+        val rawValue = rawValueOverride ?: extractRawValue(config, recoveryPath)
+        return InvalidConfigValueException(
+            displayPath = displayPath,
+            recoveryPath = recoveryPath,
+            reason = reason,
+            lineNumber = line,
+            invalidValuePreview = previewValue(rawValue),
+            cause = cause
+        )
+    }
+
+    private fun prependInvalidPath(
+        exception: InvalidConfigValueException,
+        pathPrefix: String
+    ): InvalidConfigValueException {
+        return InvalidConfigValueException(
+            displayPath = appendPath(pathPrefix, exception.displayPath),
+            recoveryPath = appendPath(pathPrefix, exception.recoveryPath),
+            reason = exception.reason,
+            lineNumber = exception.lineNumber,
+            invalidValuePreview = exception.invalidValuePreview,
+            cause = exception
+        )
+    }
+
+    private fun remapInvalidPath(
+        exception: InvalidConfigValueException,
+        displayPath: String,
+        recoveryPath: String,
+        lineNumber: Int? = exception.lineNumber
+    ): InvalidConfigValueException {
+        return InvalidConfigValueException(
+            displayPath = displayPath,
+            recoveryPath = recoveryPath,
+            reason = exception.reason,
+            lineNumber = lineNumber,
+            invalidValuePreview = exception.invalidValuePreview,
+            cause = exception
+        )
+    }
+
+    private fun extractLineNumber(config: TypesafeConfig, path: String): Int? {
+        val line = runCatching { config.getValue(path).origin().lineNumber() }
+            .getOrNull()
+        return line?.let(::sanitizeLine)
+    }
+
+    private fun extractRawValue(config: TypesafeConfig, path: String): Any? {
+        return runCatching { config.getValue(path).unwrapped() }
+            .getOrNull()
+    }
+
+    private fun sanitizeLine(line: Int): Int? = line.takeIf { it > 0 }
+
+    private fun previewValue(rawValue: Any?): String? {
+        if (rawValue == null) return "null"
+        val normalized = rawValue.toString().replace("\n", "\\n")
+        return if (normalized.length <= MAX_VALUE_PREVIEW) {
+            normalized
+        } else {
+            normalized.substring(0, MAX_VALUE_PREVIEW) + "..."
+        }
     }
 
     private fun resolvePath(prefix: String, property: KProperty1<*, *>, parameter: KParameter): String {
@@ -308,23 +553,34 @@ class Config<T : Any>(
             val path = annotation.value
             field.isAccessible = true
             when {
-                field.type == Boolean::class.javaPrimitiveType -> field.setBoolean(prototype, config.getBoolean(path))
-                field.type == Int::class.javaPrimitiveType -> field.setInt(prototype, config.getInt(path))
-                field.type == Long::class.javaPrimitiveType -> field.setLong(prototype, config.getLong(path))
-                field.type == Double::class.javaPrimitiveType -> field.setDouble(prototype, config.getDouble(path))
-                field.type == String::class.java -> field.set(prototype, config.getString(path))
+                field.type == Boolean::class.javaPrimitiveType ->
+                    field.setBoolean(prototype, readTyped(config, path, "BOOLEAN") { config.getBoolean(path) })
+
+                field.type == Int::class.javaPrimitiveType ->
+                    field.setInt(prototype, readTyped(config, path, "INT") { config.getInt(path) })
+
+                field.type == Long::class.javaPrimitiveType ->
+                    field.setLong(prototype, readTyped(config, path, "LONG") { config.getLong(path) })
+
+                field.type == Double::class.javaPrimitiveType ->
+                    field.setDouble(prototype, readTyped(config, path, "DOUBLE") { config.getDouble(path) })
+
+                field.type == String::class.java ->
+                    field.set(prototype, readTyped(config, path, "STRING") { config.getString(path) })
+
                 List::class.java.isAssignableFrom(field.type) -> {
                     val typeStr = field.genericType.toString()
                     val list = when {
-                        "String" in typeStr -> config.getStringList(path)
-                        "Integer" in typeStr || "Int" in typeStr -> config.getIntList(path)
-                        "Boolean" in typeStr -> config.getBooleanList(path)
-                        "Double" in typeStr -> config.getDoubleList(path)
-                        "Long" in typeStr -> config.getLongList(path)
+                        "String" in typeStr -> readTyped(config, path, "LIST<STRING>") { config.getStringList(path) }
+                        "Integer" in typeStr || "Int" in typeStr -> readTyped(config, path, "LIST<INT>") { config.getIntList(path) }
+                        "Boolean" in typeStr -> readTyped(config, path, "LIST<BOOLEAN>") { config.getBooleanList(path) }
+                        "Double" in typeStr -> readTyped(config, path, "LIST<DOUBLE>") { config.getDoubleList(path) }
+                        "Long" in typeStr -> readTyped(config, path, "LIST<LONG>") { config.getLongList(path) }
                         else -> error("Unsupported list type for path '$path'")
                     }
                     field.set(prototype, list)
                 }
+
                 else -> error("Unsupported config type for path '$path'")
             }
         }
@@ -422,6 +678,7 @@ class Config<T : Any>(
                 key.toString() to convertCollectionValue(entryValue, dynamicSections, keyComments, sectionComments)
             }
         }
+
         else -> if (value::class.isData) {
             snapshotDataClass(value, dynamicSections, keyComments, sectionComments)
         } else {
@@ -443,6 +700,7 @@ class Config<T : Any>(
         is Map<*, *> -> value.entries.associate { (key, entryValue) ->
             key.toString() to convertCollectionValue(entryValue, dynamicSections, keyComments, sectionComments)
         }
+
         else -> if (value::class.isData) {
             snapshotDataClass(value, dynamicSections, keyComments, sectionComments)
         } else {
@@ -528,4 +786,8 @@ class Config<T : Any>(
         return "$prefix.$key"
     }
 
+    companion object {
+        private const val MAX_RECOVERY_ATTEMPTS = 64
+        private const val MAX_VALUE_PREVIEW = 200
+    }
 }
