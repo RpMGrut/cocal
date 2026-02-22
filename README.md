@@ -22,7 +22,7 @@ repositories {
 }
 
 dependencies {
-    implementation("com.github.RpMGrut:cocal:1.3-SNAPSHOT")
+    implementation("com.github.RpMGrut:cocal:v1.4")
 }
 ```
 
