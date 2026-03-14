@@ -304,6 +304,94 @@ class ConfigTest {
         assertFalse(backupExists)
     }
 
+    enum class ExperienceWay {
+        MINING,
+        KILLING,
+        FARMING
+    }
+
+    data class AdvancedConfig(
+        @Path("level-benefits")
+        val levelBenefits: Map<Int, Double> = mapOf(
+            1 to 1.1,
+            5 to 1.5
+        ),
+        @Path("farm-ways")
+        val farmWays: Map<ExperienceWay, Int> = mapOf(
+            ExperienceWay.MINING to 10
+        )
+    )
+
+    @Test
+    fun `map with int, double and enum keys loads from defaults`() {
+        val loader = Config(tempDir, "advanced.conf", AdvancedConfig())
+        val loaded = loader.load()
+
+        assertTrue(loaded.levelBenefits.containsKey(1))
+        assertTrue(loaded.levelBenefits.containsKey(5))
+        assertEquals(1.5, loaded.levelBenefits[5])
+
+        assertTrue(loaded.farmWays.containsKey(ExperienceWay.MINING))
+
+        val file = File(tempDir, "advanced.conf")
+        val text = file.readText()
+
+        assertTrue(text.contains("\"1\"") || text.contains("1"))
+        assertTrue(text.contains("MINING"))
+    }
+
+    @Test
+    fun `map parses string keys into int and enum objects`() {
+        val file = File(tempDir, "advanced.conf")
+        file.writeText(
+            """
+            level-benefits {
+              "10" = 2.0
+              "20" = 3.5
+            }
+            farm-ways {
+              killing = 50
+              FARMING = 100
+            }
+            """.trimIndent()
+        )
+
+        val loader = Config(tempDir, "advanced.conf", AdvancedConfig())
+        val loaded = loader.load()
+
+        assertEquals(2.0, loaded.levelBenefits[10])
+        assertEquals(3.5, loaded.levelBenefits[20])
+
+        assertEquals(50, loaded.farmWays[ExperienceWay.KILLING])
+        assertEquals(100, loaded.farmWays[ExperienceWay.FARMING])
+    }
+
+    @Test
+    fun `invalid map keys trigger recovery`() {
+        val file = File(tempDir, "advanced.conf")
+        file.writeText(
+            """
+            level-benefits {
+              not_a_number = 1.0
+            }
+            farm-ways {
+              INVALID_ENUM = 10
+            }
+            """.trimIndent()
+        )
+
+        val loader = Config(tempDir, "advanced.conf", AdvancedConfig())
+        val loaded = loader.load()
+
+        // Должно откатиться к дефолтам из-за невалидных ключей
+        assertEquals(1.1, loaded.levelBenefits[1])
+        assertEquals(10, loaded.farmWays[ExperienceWay.MINING])
+
+        // Проверяем, что создался бэкап, так как это была критическая ошибка структуры ключа
+        val backups = tempDir.listFiles()?.filter { it.name.contains("save-") } ?: emptyList()
+        assertTrue(backups.isNotEmpty(), "Should create backup because of invalid map keys")
+    }
+
     private fun backupFiles(prefix: String): List<File> {
         return tempDir.listFiles()
             ?.filter { it.name.startsWith(prefix) }
