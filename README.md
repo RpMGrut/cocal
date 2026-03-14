@@ -94,6 +94,13 @@ val loader = Config(
 )
 ```
 
+Map keys support:
+
+- `String`
+- `Int`
+- `Double`
+- `Enum`
+
 Options:
 
 - `header`: comment block at top of file

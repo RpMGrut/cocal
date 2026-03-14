@@ -76,8 +76,8 @@ class Config<T : Any>(
         val file = File(folder, fileName)
 
         val blueprint = buildDataBlueprint(prototype)
-        val defaultConfig = ConfigFactory.parseMap(blueprint.tree)
         val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
+        val defaultConfig = parseRenderedConfig(defaultText)
 
         val existing = readConfigFile(file, defaultText)
         val klass = prototype::class as KClass<T>
@@ -100,8 +100,8 @@ class Config<T : Any>(
         val file = File(folder, fileName)
 
         val blueprint = buildLegacyBlueprint()
-        val defaultConfig = ConfigFactory.parseMap(blueprint.tree)
         val defaultText = renderConfig(blueprint.tree, blueprint.keyComments, blueprint.sectionComments)
+        val defaultConfig = parseRenderedConfig(defaultText)
 
         val existing = readConfigFile(file, defaultText)
 
@@ -230,6 +230,11 @@ class Config<T : Any>(
         file.writeText(defaultText)
     }
 
+    private fun parseRenderedConfig(text: String): TypesafeConfig {
+        if (text.isBlank()) return ConfigFactory.empty()
+        return ConfigFactory.parseString(text)
+    }
+
     private fun writeOrderedConfig(
         file: File,
         blueprint: Blueprint,
@@ -249,7 +254,7 @@ class Config<T : Any>(
     ): Map<String, Any?> {
         val result = linkedMapOf<String, Any?>()
         template.forEach { (key, value) ->
-            val path = appendPath(prefix, key)
+            val path = appendConfigPath(prefix, key)
             val resolvedValue = when {
                 dynamicSections.contains(path) -> snapshotDynamicSection(source, path) ?: value
                 value is Map<*, *> -> {
@@ -269,7 +274,7 @@ class Config<T : Any>(
         val obj = config.getObject(path)
         val map = linkedMapOf<String, Any?>()
         obj.forEach { (key, value) ->
-            val childPath = appendPath(path, key)
+            val childPath = appendConfigPath(path, key)
             val resolved = when (value.valueType()) {
                 ConfigValueType.OBJECT -> snapshotDynamicSection(config, childPath)
                 ConfigValueType.LIST,
@@ -393,20 +398,80 @@ class Config<T : Any>(
         }
     }
 
-    private fun readMap(type: KType, config: TypesafeConfig, path: String): Map<String, Any?> {
+    private fun readMap(type: KType, config: TypesafeConfig, path: String): Map<Any, Any?> {
         val keyType = type.arguments.getOrNull(0)?.type?.jvmErasure
             ?: error("Map key type missing at path '$path'")
-        require(keyType == String::class) { "Only String map keys are supported at path '$path'" }
         val valueType = type.arguments.getOrNull(1)?.type
             ?: error("Map value type missing at path '$path'")
         val section = readTyped(config, path, "OBJECT") { config.getConfig(path) }
         val keys = section.root().keys
-        val result = linkedMapOf<String, Any?>()
-        keys.forEach { key ->
-            val childPath = if (path.isEmpty()) key else "$path.$key"
+        val result = linkedMapOf<Any, Any?>()
+        keys.forEach { rawKey ->
+            val childPath = appendConfigPath(path, rawKey)
+            val key = parseMapKey(keyType, rawKey, config, path, childPath)
             result[key] = readValue(valueType, config, childPath)
         }
         return result
+    }
+
+    private fun parseMapKey(
+        keyType: KClass<*>,
+        rawKey: String,
+        config: TypesafeConfig,
+        mapPath: String,
+        childPath: String
+    ): Any {
+        return when {
+            keyType == String::class -> rawKey
+            keyType == Int::class -> rawKey.toIntOrNull()
+                ?: throw invalidConfigValue(
+                    config = config,
+                    displayPath = childPath,
+                    recoveryPath = mapPath,
+                    reason = "Key '$rawKey' must be an integer (Int)",
+                    lineNumberOverride = extractLineNumber(config, childPath),
+                    rawValueOverride = rawKey
+                )
+
+            keyType == Double::class -> rawKey.toDoubleOrNull()
+                ?.takeIf { it.isFinite() }
+                ?: throw invalidConfigValue(
+                    config = config,
+                    displayPath = childPath,
+                    recoveryPath = mapPath,
+                    reason = "Key '$rawKey' must be a finite double (Double)",
+                    lineNumberOverride = extractLineNumber(config, childPath),
+                    rawValueOverride = rawKey
+                )
+
+            keyType.java.isEnum -> parseEnumMapKey(enumClass(keyType), rawKey, config, mapPath, childPath)
+            else -> error(
+                "Key of type '$keyType' at path '$mapPath' is not supported. " +
+                    "Supported key types: String, Int, Double, Enum."
+            )
+        }
+    }
+
+    private fun parseEnumMapKey(
+        enumClass: Class<out Enum<*>>,
+        rawKey: String,
+        config: TypesafeConfig,
+        mapPath: String,
+        childPath: String
+    ): Enum<*> {
+        return try {
+            java.lang.Enum.valueOf(enumClass, rawKey.uppercase())
+        } catch (_: IllegalArgumentException) {
+            val allowed = enumClass.enumConstants.joinToString(", ") { it.name }
+            throw invalidConfigValue(
+                config = config,
+                displayPath = childPath,
+                recoveryPath = mapPath,
+                reason = "Invalid enum key '$rawKey' for ${enumClass.simpleName}. Allowed: $allowed",
+                lineNumberOverride = extractLineNumber(config, childPath),
+                rawValueOverride = rawKey
+            )
+        }
     }
 
     private fun readEnum(
@@ -786,8 +851,30 @@ class Config<T : Any>(
         return "$prefix.$key"
     }
 
+    private fun appendConfigPath(prefix: String, key: String): String {
+        return appendPath(prefix, renderConfigPathSegment(key))
+    }
+
+    private fun renderConfigPathSegment(raw: String): String {
+        return if (PATH_SEGMENT_REGEX.matches(raw)) raw else quotePathSegment(raw)
+    }
+
+    private fun quotePathSegment(raw: String): String {
+        val escaped = buildString(raw.length + 4) {
+            raw.forEach { ch ->
+                when (ch) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    else -> append(ch)
+                }
+            }
+        }
+        return "\"$escaped\""
+    }
+
     companion object {
         private const val MAX_RECOVERY_ATTEMPTS = 64
         private const val MAX_VALUE_PREVIEW = 200
+        private val PATH_SEGMENT_REGEX = Regex("[A-Za-z0-9_-]+")
     }
 }

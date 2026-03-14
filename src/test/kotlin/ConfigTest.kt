@@ -55,6 +55,34 @@ class ConfigTest {
         val rules: List<PenetrationRule> = emptyList()
     )
 
+    enum class ExperienceWay {
+        MINING,
+        KILLING,
+        FARMING
+    }
+
+    data class AdvancedConfig(
+        @Path("level-benefits")
+        val levelBenefits: Map<Int, Double> = mapOf(
+            1 to 1.1,
+            5 to 1.5
+        ),
+        @Path("farm-ways")
+        val farmWays: Map<ExperienceWay, Int> = mapOf(
+            ExperienceWay.MINING to 10
+        ),
+        @Path("drop-rates")
+        val dropRates: Map<Double, String> = mapOf(
+            1.5 to "common",
+            2.25 to "rare"
+        ),
+        @Path("labels")
+        val labels: Map<String, Int> = mapOf(
+            "alpha.beta" to 1,
+            "boss wave" to 2
+        )
+    )
+
     class LegacyConfig {
         @Path("legacy.value")
         var value: String = "default"
@@ -302,6 +330,90 @@ class ConfigTest {
         assertEquals(original, file.readText())
         val backupExists = tempDir.listFiles()?.any { it.name.startsWith("profilesave-") } ?: false
         assertFalse(backupExists)
+    }
+
+    @Test
+    fun `map with int enum double and quoted string keys loads from defaults`() {
+        val loaded = Config(tempDir, "advanced.conf", AdvancedConfig()).load()
+
+        assertEquals(1.5, loaded.levelBenefits[5])
+        assertEquals(10, loaded.farmWays[ExperienceWay.MINING])
+        assertEquals("rare", loaded.dropRates[2.25])
+        assertEquals(1, loaded.labels["alpha.beta"])
+        assertEquals(2, loaded.labels["boss wave"])
+    }
+
+    @Test
+    fun `map parses int enum double and dotted string keys from file`() {
+        val file = File(tempDir, "advanced.conf")
+        file.writeText(
+            """
+            level-benefits {
+              "10" = 2.0
+              "20" = 3.5
+            }
+            farm-ways {
+              killing = 50
+              FARMING = 100
+            }
+            drop-rates {
+              "1.75" = "boosted"
+              "3.5" = "epic"
+            }
+            labels {
+              "alpha.beta" = 7
+              "boss wave" = 9
+            }
+            """.trimIndent()
+        )
+
+        val loaded = Config(tempDir, "advanced.conf", AdvancedConfig()).load()
+
+        assertEquals(2.0, loaded.levelBenefits[10])
+        assertEquals(3.5, loaded.levelBenefits[20])
+        assertEquals(50, loaded.farmWays[ExperienceWay.KILLING])
+        assertEquals(100, loaded.farmWays[ExperienceWay.FARMING])
+        assertEquals("boosted", loaded.dropRates[1.75])
+        assertEquals("epic", loaded.dropRates[3.5])
+        assertEquals(7, loaded.labels["alpha.beta"])
+        assertEquals(9, loaded.labels["boss wave"])
+    }
+
+    @Test
+    fun `invalid typed map keys roll back that map and keep other overrides`() {
+        val file = File(tempDir, "advanced.conf")
+        file.writeText(
+            """
+            level-benefits {
+              not_a_number = 1.0
+            }
+            farm-ways {
+              INVALID_ENUM = 10
+            }
+            drop-rates {
+              invalid_double = "bad"
+            }
+            labels {
+              "alpha.beta" = 77
+            }
+            """.trimIndent()
+        )
+
+        val warnings = captureConfigWarnings {
+            val loaded = Config(tempDir, "advanced.conf", AdvancedConfig()).load()
+
+            assertEquals(1.1, loaded.levelBenefits[1])
+            assertEquals(10, loaded.farmWays[ExperienceWay.MINING])
+            assertEquals("common", loaded.dropRates[1.5])
+            assertEquals(77, loaded.labels["alpha.beta"])
+        }
+
+        val text = file.readText()
+        assertTrue(text.contains("\"alpha.beta\" = 77"))
+        assertTrue(backupFiles("advancedsave-").isEmpty())
+        assertTrue(warnings.any { it.contains("level-benefits") && it.contains("not_a_number") })
+        assertTrue(warnings.any { it.contains("farm-ways") && it.contains("INVALID_ENUM") })
+        assertTrue(warnings.any { it.contains("drop-rates") && it.contains("invalid_double") })
     }
 
     private fun backupFiles(prefix: String): List<File> {
