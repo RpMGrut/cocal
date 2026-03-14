@@ -393,17 +393,29 @@ class Config<T : Any>(
         }
     }
 
-    private fun readMap(type: KType, config: TypesafeConfig, path: String): Map<String, Any?> {
+    private fun readMap(type: KType, config: TypesafeConfig, path: String): Map<Any, Any?> {
         val keyType = type.arguments.getOrNull(0)?.type?.jvmErasure
             ?: error("Map key type missing at path '$path'")
-        require(keyType == String::class) { "Only String map keys are supported at path '$path'" }
+
         val valueType = type.arguments.getOrNull(1)?.type
             ?: error("Map value type missing at path '$path'")
+
         val section = readTyped(config, path, "OBJECT") { config.getConfig(path) }
         val keys = section.root().keys
-        val result = linkedMapOf<String, Any?>()
-        keys.forEach { key ->
-            val childPath = if (path.isEmpty()) key else "$path.$key"
+        val result = linkedMapOf<Any, Any?>()
+
+        keys.forEach { rawKey ->
+            val childPath = if (path.isEmpty()) "\"$rawKey\"" else "$path.\"$rawKey\""
+            val key: Any = when {
+                keyType == String::class -> rawKey
+                keyType == Int::class -> rawKey.toIntOrNull()
+                    ?: throw invalidConfigValue(config, childPath, path, "Key '$rawKey' must be an integer (Int)")
+                keyType.java.isEnum -> {
+                    readEnum(enumClass(keyType), rawKey, config, childPath)
+                }
+                else -> error("Key of type '$keyType' with path '$path' is not supported. Supported key types: String, Int, Enum.")
+            }
+
             result[key] = readValue(valueType, config, childPath)
         }
         return result
