@@ -2,14 +2,16 @@ package me.delyfss.cocal.message
 
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextDecoration
-import net.kyori.adventure.text.minimessage.MiniMessage
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
 import java.util.logging.Logger
 
-internal class PlaceholderHandler(private val logger: Logger?) {
-    private val miniMessage = MiniMessage.miniMessage()
+internal class PlaceholderHandler(
+    private val logger: Logger?,
+    internal val parserBackend: Messages.ParserBackend = Messages.ParserBackend.MINI_MESSAGE
+) {
+    private val componentParser = MessageComponentParser.create(parserBackend)
     private val plainSerializer = PlainTextComponentSerializer.plainText()
 
     fun component(
@@ -22,7 +24,7 @@ internal class PlaceholderHandler(private val logger: Logger?) {
         if (parsed.isEmpty()) return null
         val firstLine = normalizedLines(parsed).firstOrNull() ?: return null
         if (firstLine.isEmpty()) return Component.empty()
-        return miniMessage.deserialize(firstLine).decoration(TextDecoration.ITALIC, false)
+        return componentParser.deserialize(firstLine).decoration(TextDecoration.ITALIC, false)
     }
 
     fun componentLines(
@@ -42,7 +44,7 @@ internal class PlaceholderHandler(private val logger: Logger?) {
                 if (line.isEmpty()) {
                     components += Component.empty()
                 } else {
-                    components += miniMessage.deserialize(line).decoration(TextDecoration.ITALIC, false)
+                    components += componentParser.deserialize(line).decoration(TextDecoration.ITALIC, false)
                 }
             }
         }

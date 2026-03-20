@@ -77,18 +77,24 @@ class Messages(
         }
     }
 
+    enum class ParserBackend {
+        MINI_MESSAGE,
+        QUICK_MINI_MESSAGE
+    }
+
     data class Options(
         val rootPath: String = "messages",
         val sharedPlaceholders: Map<String, String> = emptyMap(),
         val localesFolderName: String = "languages",
         val metaRootPath: String = "messages-meta",
         val defaultLocaleKey: String = "default-locale",
-        val fallbackDefaultLocale: String = DEFAULT_FALLBACK_LOCALE
+        val fallbackDefaultLocale: String = DEFAULT_FALLBACK_LOCALE,
+        val parserBackend: ParserBackend = ParserBackend.MINI_MESSAGE
     )
 
     private var config: Config = ConfigFactory.empty()
     private var localeConfigs: Map<String, Config> = emptyMap()
-    private val placeholderHandler = PlaceholderHandler(logger)
+    private val placeholderHandler = PlaceholderHandler(logger, options.parserBackend)
     private var sharedReplacements: Map<String, String> = options.sharedPlaceholders
 
     fun load() = reload()
@@ -411,10 +417,25 @@ class Messages(
         private const val DEFAULT_FADE_OUT = 20
         private const val DEFAULT_FALLBACK_LOCALE = "en-US"
 
+        fun fromFile(
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
+            onCorrupted: ((File, Exception) -> String?)? = null
+        ): Messages {
+            return createFromFile(
+                plugin = null,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
+
         @Deprecated(
             message = "This method doesn't support server startup checks. Use the overload with the plugin parameter instead.",
             replaceWith = ReplaceWith(
-                "Messages.fromFile(plugin, fileProvider, logger, rootPath, sharedPlaceholders, onCorrupted)"
+                "Messages.fromFile(fileProvider, logger, Messages.Options(rootPath, sharedPlaceholders, localesFolderName, metaRootPath, defaultLocaleKey, fallbackDefaultLocale), onCorrupted)"
             ),
             level = DeprecationLevel.WARNING
         )
@@ -437,15 +458,28 @@ class Messages(
                 defaultLocaleKey = defaultLocaleKey,
                 fallbackDefaultLocale = fallbackDefaultLocale
             )
-            val supplier = {
-                val file = fileProvider()
-                loadFromFile(file, onCorrupted)
-            }
-            val localeSupplier = {
-                val file = fileProvider()
-                loadLocaleFiles(file.parentFile, options.localesFolderName, logger)
-            }
-            return Messages(supplier, logger, options, localeConfigSupplier = localeSupplier)
+            return fromFile(
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
+
+        fun fromFile(
+            plugin: JavaPlugin,
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
+            onCorrupted: ((File, Exception) -> String?)? = null
+        ): Messages {
+            return createFromFile(
+                plugin = plugin,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
         }
 
         fun fromFile(
@@ -468,6 +502,22 @@ class Messages(
                 defaultLocaleKey = defaultLocaleKey,
                 fallbackDefaultLocale = fallbackDefaultLocale
             )
+            return fromFile(
+                plugin = plugin,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
+
+        private fun createFromFile(
+            plugin: JavaPlugin?,
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
+            onCorrupted: ((File, Exception) -> String?)?
+        ): Messages {
             val supplier = {
                 val file = fileProvider()
                 loadFromFile(file, onCorrupted)

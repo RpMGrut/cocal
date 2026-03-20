@@ -2,7 +2,7 @@
 
 A lightweight HOCON-based configuration helper for Kotlin/JVM plugins.
 
-## What is new in 1.3
+## What is new in 1.4
 
 - Config comments via annotations:
   - `@Comment(...)`
@@ -12,6 +12,12 @@ A lightweight HOCON-based configuration helper for Kotlin/JVM plugins.
   - `languages/<locale>.conf` (overrides)
 - Locale fallback chain:
   - exact locale -> language -> configured default locale -> base file
+- Selective config recovery for invalid values with warning logs
+- Experimental `QuickMiniMessage` backend for messages, opt-in via `Messages.Options`
+
+## Requirements
+
+- Java 21+
 
 ## Quick start
 
@@ -19,6 +25,7 @@ A lightweight HOCON-based configuration helper for Kotlin/JVM plugins.
 repositories {
     mavenCentral()
     maven("https://jitpack.io")
+    maven("https://repo.nekroplex.com/releases")
 }
 
 dependencies {
@@ -204,7 +211,10 @@ class MessageExample(private val plugin: JavaPlugin) {
         plugin = plugin,
         fileProvider = { File(plugin.dataFolder, "messages.conf") },
         logger = plugin.logger,
-        rootPath = "messages",
+        options = Messages.Options(
+            rootPath = "messages",
+            parserBackend = Messages.ParserBackend.MINI_MESSAGE
+        ),
         onCorrupted = { _, _ ->
             plugin.getResource("messages.conf")?.reader()?.readText()
         }
@@ -227,6 +237,28 @@ class MessageExample(private val plugin: JavaPlugin) {
     }
 }
 ```
+
+`Messages.ParserBackend.MINI_MESSAGE` remains the safe default.
+
+If you want to try the faster parser backend:
+
+```kotlin
+val messages = Messages.fromFile(
+    plugin = plugin,
+    fileProvider = { File(plugin.dataFolder, "messages.conf") },
+    logger = plugin.logger,
+    options = Messages.Options(
+        rootPath = "messages",
+        parserBackend = Messages.ParserBackend.QUICK_MINI_MESSAGE
+    )
+)
+```
+
+`QUICK_MINI_MESSAGE` is experimental:
+
+- it is faster on common tags and plain formatting
+- it is not the default backend
+- it may differ from regular `MiniMessage` on more complex tags such as `gradient` and `rainbow`
 
 Available channels inside one message template remain the same:
 
