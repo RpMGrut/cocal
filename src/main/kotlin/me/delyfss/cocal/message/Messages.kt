@@ -4,29 +4,31 @@ import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import com.typesafe.config.ConfigRenderOptions
 import com.typesafe.config.ConfigValueType
+import me.delyfss.cocal.util.FileBackups
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.title.Title
 import org.bukkit.Sound
 import org.bukkit.SoundCategory
 import org.bukkit.command.CommandSender
 import org.bukkit.entity.Player
-import me.delyfss.cocal.util.FileBackups
 import org.bukkit.plugin.java.JavaPlugin
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.HashMap
+import java.util.LinkedHashMap
 import java.util.logging.Logger
 
 class Messages(
     private val configSupplier: () -> Config,
     private val logger: Logger,
     private val options: Options = Options(),
-    private val plugin: JavaPlugin? = null
+    private val plugin: JavaPlugin? = null,
+    private val localeConfigSupplier: (() -> Map<String, Config>)? = null
 ) {
 
     fun ensureDefaults(file: File, defaultPath: String? = null) {
-        if (plugin == null) {
+        val plugin = plugin ?: run {
             logger.warning("ensureDefaults requires a plugin instance to read default resources")
             return
         }
@@ -75,45 +77,79 @@ class Messages(
         }
     }
 
+    enum class ParserBackend {
+        MINI_MESSAGE,
+        QUICK_MINI_MESSAGE
+    }
+
     data class Options(
         val rootPath: String = "messages",
-        val sharedPlaceholders: Map<String, String> = emptyMap()
+        val sharedPlaceholders: Map<String, String> = emptyMap(),
+        val localesFolderName: String = "languages",
+        val metaRootPath: String = "messages-meta",
+        val defaultLocaleKey: String = "default-locale",
+        val fallbackDefaultLocale: String = DEFAULT_FALLBACK_LOCALE,
+        val parserBackend: ParserBackend = ParserBackend.MINI_MESSAGE
     )
 
     private var config: Config = ConfigFactory.empty()
-    private val placeholderHandler = PlaceholderHandler(logger)
+    private var localeConfigs: Map<String, Config> = emptyMap()
+    private val placeholderHandler = PlaceholderHandler(logger, options.parserBackend)
     private var sharedReplacements: Map<String, String> = options.sharedPlaceholders
 
     fun load() = reload()
 
     fun reload() {
         config = configSupplier().resolve()
-        sharedReplacements = resolveSharedReplacements()
+        localeConfigs = runCatching { localeConfigSupplier?.invoke() ?: emptyMap() }
+            .onFailure { ex ->
+                logger.warning("Failed to load locale files: ${ex.message ?: ex::class.simpleName}")
+            }
+            .getOrDefault(emptyMap())
+        sharedReplacements = options.sharedPlaceholders
     }
 
     fun raw(path: String): MessageTemplate? = template(path)
 
-    fun template(path: String): MessageTemplate? {
+    fun rawLocalized(path: String, localeTag: String?): MessageTemplate? = templateLocalized(path, localeTag)
+
+    fun template(path: String): MessageTemplate? = templateLocalized(path, null)
+
+    fun templateLocalized(path: String, localeTag: String?): MessageTemplate? {
         val fullPath = toFullPath(path)
-        if (!config.hasPath(fullPath)) return null
-        val value = config.getValue(fullPath)
-        return when (value.valueType()) {
-            ConfigValueType.STRING -> MessageTemplate(chatLines = listOf(config.getString(fullPath)))
-            ConfigValueType.LIST -> MessageTemplate(chatLines = config.getStringList(fullPath))
-            ConfigValueType.OBJECT -> parseObject(config.getConfig(fullPath), path)
-            else -> null
+        return resolveConfigChain(localeTag).firstNotNullOfOrNull { source ->
+            parseTemplateAt(source, fullPath)
         }
     }
 
     fun plain(path: String, player: Player? = null, replacements: Map<String, String> = emptyMap()): String? {
-        val template = template(path) ?: return null
+        return plainLocalized(path, player?.locale, player, replacements)
+    }
+
+    fun plainLocalized(
+        path: String,
+        localeTag: String?,
+        player: Player? = null,
+        replacements: Map<String, String> = emptyMap()
+    ): String? {
+        val template = templateLocalized(path, localeTag) ?: return null
         val firstLine = template.chatLines.firstOrNull() ?: return null
-        return placeholderHandler.plain(firstLine, player, mergeReplacements(replacements))
+        return placeholderHandler.plain(firstLine, player, mergeReplacements(replacements, localeTag))
     }
 
     fun send(sender: CommandSender, path: String, replacements: Map<String, String> = emptyMap()) {
-        val template = template(path) ?: return
-        deliver(sender, template, replacements)
+        val locale = (sender as? Player)?.locale
+        sendLocalized(sender, path, locale, replacements)
+    }
+
+    fun sendLocalized(
+        sender: CommandSender,
+        path: String,
+        localeTag: String?,
+        replacements: Map<String, String> = emptyMap()
+    ) {
+        val template = templateLocalized(path, localeTag) ?: return
+        deliver(sender, template, localeTag, replacements)
     }
 
     fun sendMany(
@@ -121,12 +157,19 @@ class Messages(
         path: String,
         replacements: Map<String, String> = emptyMap()
     ) {
-        val template = template(path) ?: return
-        recipients.forEach { deliver(it, template, replacements) }
+        recipients.forEach { recipient ->
+            val locale = (recipient as? Player)?.locale
+            sendLocalized(recipient, path, locale, replacements)
+        }
     }
 
-    private fun deliver(sender: CommandSender, template: MessageTemplate, replacements: Map<String, String>) {
-        val merged = mergeReplacements(replacements)
+    private fun deliver(
+        sender: CommandSender,
+        template: MessageTemplate,
+        localeTag: String?,
+        replacements: Map<String, String>
+    ) {
+        val merged = mergeReplacements(replacements, localeTag)
         val player = sender as? Player
         val chatComponents = placeholderHandler.componentLines(template.chatLines, player, merged)
         if (chatComponents.isNotEmpty()) {
@@ -159,6 +202,17 @@ class Messages(
                 val category = soundSpec.category ?: SoundCategory.MASTER
                 player.playSound(player.location, soundSpec.sound, category, soundSpec.volume, soundSpec.pitch)
             }
+        }
+    }
+
+    private fun parseTemplateAt(source: Config, fullPath: String): MessageTemplate? {
+        if (!source.hasPath(fullPath)) return null
+        val value = source.getValue(fullPath)
+        return when (value.valueType()) {
+            ConfigValueType.STRING -> MessageTemplate(chatLines = listOf(source.getString(fullPath)))
+            ConfigValueType.LIST -> MessageTemplate(chatLines = source.getStringList(fullPath))
+            ConfigValueType.OBJECT -> parseObject(source.getConfig(fullPath), fullPath)
+            else -> null
         }
     }
 
@@ -239,30 +293,79 @@ class Messages(
         }
     }
 
-    private fun mergeReplacements(extra: Map<String, String>): Map<String, String> {
-        if (sharedReplacements.isEmpty()) return extra
-        if (extra.isEmpty()) return sharedReplacements
-        val merged = HashMap<String, String>(sharedReplacements.size + extra.size)
-        merged.putAll(sharedReplacements)
+    private fun mergeReplacements(extra: Map<String, String>, localeTag: String?): Map<String, String> {
+        val localizedPrefix = resolveLocalizedString("prefix", localeTag)
+
+        val shared = if (localizedPrefix != null && localizedPrefix.isNotBlank()) {
+            val merged = LinkedHashMap<String, String>(sharedReplacements.size + 1)
+            merged.putAll(sharedReplacements)
+            merged["prefix"] = localizedPrefix
+            merged
+        } else {
+            sharedReplacements
+        }
+
+        if (shared.isEmpty()) return extra
+        if (extra.isEmpty()) return shared
+
+        val merged = HashMap<String, String>(shared.size + extra.size)
+        merged.putAll(shared)
         merged.putAll(extra)
         return merged
     }
 
-    private fun resolveSharedReplacements(): Map<String, String> {
-        val base = if (options.sharedPlaceholders.isEmpty()) emptyMap() else HashMap(options.sharedPlaceholders)
-        val prefixPath = toFullPath("prefix")
-        if (config.hasPath(prefixPath)) {
-            val prefix = config.getString(prefixPath)
-            if (prefix.isNotBlank()) {
-                if (base.isEmpty()) {
-                    return mapOf("prefix" to prefix)
-                }
-                val merged = HashMap(base)
-                merged["prefix"] = prefix
-                return merged
+    private fun resolveLocalizedString(path: String, localeTag: String?): String? {
+        val fullPath = toFullPath(path)
+        resolveConfigChain(localeTag).forEach { source ->
+            if (!source.hasPath(fullPath)) return@forEach
+            val value = source.getValue(fullPath)
+            if (value.valueType() == ConfigValueType.STRING) {
+                return source.getString(fullPath)
             }
         }
-        return base
+        return null
+    }
+
+    private fun resolveConfigChain(localeTag: String?): List<Config> {
+        val chain = ArrayList<Config>(4)
+        val added = HashSet<String>()
+
+        fun addLocale(tag: String?) {
+            val normalized = normalizeLocaleTag(tag) ?: return
+            val localeConfig = localeConfigs[normalized] ?: return
+            if (added.add("locale:$normalized")) {
+                chain += localeConfig
+            }
+        }
+
+        val normalizedRequested = normalizeLocaleTag(localeTag)
+        if (normalizedRequested != null) {
+            addLocale(normalizedRequested)
+            val language = normalizedRequested.substringBefore('-', normalizedRequested)
+            if (language != normalizedRequested) {
+                addLocale(language)
+            }
+        }
+
+        addLocale(resolveDefaultLocaleTag())
+
+        if (added.add("base")) {
+            chain += config
+        }
+
+        return chain
+    }
+
+    private fun resolveDefaultLocaleTag(): String {
+        val metaPath = "${options.metaRootPath}.${options.defaultLocaleKey}"
+        val configured = if (config.hasPath(metaPath)) {
+            config.getString(metaPath)
+        } else {
+            options.fallbackDefaultLocale
+        }
+        return normalizeLocaleTag(configured)
+            ?: normalizeLocaleTag(options.fallbackDefaultLocale)
+            ?: DEFAULT_FALLBACK_LOCALE
     }
 
     private fun toFullPath(path: String): String {
@@ -312,25 +415,71 @@ class Messages(
         private const val DEFAULT_FADE_IN = 10
         private const val DEFAULT_STAY = 70
         private const val DEFAULT_FADE_OUT = 20
+        private const val DEFAULT_FALLBACK_LOCALE = "en-US"
+
+        fun fromFile(
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
+            onCorrupted: ((File, Exception) -> String?)? = null
+        ): Messages {
+            return createFromFile(
+                plugin = null,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
 
         @Deprecated(
             message = "This method doesn't support server startup checks. Use the overload with the plugin parameter instead.",
             replaceWith = ReplaceWith(
-                "Messages.fromFile(plugin, fileProvider, logger, rootPath, sharedPlaceholders, onCorrupted)"
+                "Messages.fromFile(fileProvider, logger, Messages.Options(rootPath, sharedPlaceholders, localesFolderName, metaRootPath, defaultLocaleKey, fallbackDefaultLocale), onCorrupted)"
             ),
-            level = DeprecationLevel.WARNING)
+            level = DeprecationLevel.WARNING
+        )
         fun fromFile(
             fileProvider: () -> File,
             logger: Logger,
             rootPath: String = "messages",
             sharedPlaceholders: Map<String, String> = emptyMap(),
+            onCorrupted: ((File, Exception) -> String?)? = null,
+            localesFolderName: String = "languages",
+            metaRootPath: String = "messages-meta",
+            defaultLocaleKey: String = "default-locale",
+            fallbackDefaultLocale: String = DEFAULT_FALLBACK_LOCALE
+        ): Messages {
+            val options = Options(
+                rootPath = rootPath,
+                sharedPlaceholders = sharedPlaceholders,
+                localesFolderName = localesFolderName,
+                metaRootPath = metaRootPath,
+                defaultLocaleKey = defaultLocaleKey,
+                fallbackDefaultLocale = fallbackDefaultLocale
+            )
+            return fromFile(
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
+
+        fun fromFile(
+            plugin: JavaPlugin,
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
             onCorrupted: ((File, Exception) -> String?)? = null
         ): Messages {
-            val supplier = {
-                val file = fileProvider()
-                loadFromFile(file, onCorrupted)
-            }
-            return Messages(supplier, logger, Options(rootPath, sharedPlaceholders))
+            return createFromFile(
+                plugin = plugin,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
         }
 
         fun fromFile(
@@ -339,13 +488,88 @@ class Messages(
             logger: Logger,
             rootPath: String = "messages",
             sharedPlaceholders: Map<String, String> = emptyMap(),
-            onCorrupted: ((File, Exception) -> String?)? = null
+            onCorrupted: ((File, Exception) -> String?)? = null,
+            localesFolderName: String = "languages",
+            metaRootPath: String = "messages-meta",
+            defaultLocaleKey: String = "default-locale",
+            fallbackDefaultLocale: String = DEFAULT_FALLBACK_LOCALE
+        ): Messages {
+            val options = Options(
+                rootPath = rootPath,
+                sharedPlaceholders = sharedPlaceholders,
+                localesFolderName = localesFolderName,
+                metaRootPath = metaRootPath,
+                defaultLocaleKey = defaultLocaleKey,
+                fallbackDefaultLocale = fallbackDefaultLocale
+            )
+            return fromFile(
+                plugin = plugin,
+                fileProvider = fileProvider,
+                logger = logger,
+                options = options,
+                onCorrupted = onCorrupted
+            )
+        }
+
+        private fun createFromFile(
+            plugin: JavaPlugin?,
+            fileProvider: () -> File,
+            logger: Logger,
+            options: Options,
+            onCorrupted: ((File, Exception) -> String?)?
         ): Messages {
             val supplier = {
                 val file = fileProvider()
                 loadFromFile(file, onCorrupted)
             }
-            return Messages(supplier, logger, Options(rootPath, sharedPlaceholders), plugin)
+            val localeSupplier = {
+                val file = fileProvider()
+                loadLocaleFiles(file.parentFile, options.localesFolderName, logger)
+            }
+            return Messages(
+                configSupplier = supplier,
+                logger = logger,
+                options = options,
+                plugin = plugin,
+                localeConfigSupplier = localeSupplier
+            )
+        }
+
+        private fun loadLocaleFiles(
+            parentFolder: File?,
+            localesFolderName: String,
+            logger: Logger
+        ): Map<String, Config> {
+            if (parentFolder == null) return emptyMap()
+            val localesFolder = File(parentFolder, localesFolderName)
+            if (!localesFolder.exists() || !localesFolder.isDirectory) {
+                return emptyMap()
+            }
+
+            val files = localesFolder.listFiles { file ->
+                file.isFile && file.extension.equals("conf", ignoreCase = true)
+            }?.sortedBy { it.name.lowercase() } ?: return emptyMap()
+
+            val loaded = linkedMapOf<String, Config>()
+            files.forEach { file ->
+                val localeTag = normalizeLocaleTag(file.nameWithoutExtension)
+                if (localeTag == null) {
+                    logger.warning("Skipping locale file with invalid tag: ${file.name}")
+                    return@forEach
+                }
+
+                val parsed = try {
+                    ConfigFactory.parseFile(file).resolve()
+                } catch (ex: Exception) {
+                    val contents = runCatching { file.readText() }.getOrNull()
+                    FileBackups.backup(file, contents)
+                    logger.warning("Failed to parse locale file '${file.name}': ${ex.message ?: ex::class.simpleName}")
+                    return@forEach
+                }
+
+                loaded[localeTag] = parsed
+            }
+            return loaded
         }
 
         private fun loadFromFile(
@@ -368,6 +592,21 @@ class Messages(
                     throw ex
                 }
             }
+        }
+
+        internal fun normalizeLocaleTag(raw: String?): String? {
+            if (raw.isNullOrBlank()) return null
+            val normalized = raw.trim().replace('_', '-')
+            val parts = normalized.split('-').filter { it.isNotBlank() }
+            if (parts.isEmpty()) return null
+
+            val language = parts.first().lowercase()
+            if (!language.matches(Regex("[a-z]{2,8}"))) return null
+            if (parts.size == 1) return language
+
+            val region = parts[1].uppercase()
+            if (!region.matches(Regex("[A-Z0-9]{2,8}"))) return null
+            return "$language-$region"
         }
     }
 }
