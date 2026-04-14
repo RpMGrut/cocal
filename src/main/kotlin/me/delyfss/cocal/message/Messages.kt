@@ -42,8 +42,8 @@ class Messages(
         }
 
         val path = defaultPath ?: runCatching {
-            plugin.dataFolder.toPath()
-                .relativize(file.toPath())
+            plugin?.dataFolder?.toPath()
+                ?.relativize(file.toPath())
                 .toString()
                 .replace('\\', '/')
         }.getOrNull()
@@ -66,6 +66,7 @@ class Messages(
             return
         }
 
+        file.parentFile?.mkdirs()
         file.bufferedWriter(StandardCharsets.UTF_8).use { writer ->
             val renderOptions = ConfigRenderOptions.defaults()
                 .setOriginComments(false)
