@@ -42,8 +42,8 @@ class Messages(
         }
 
         val path = defaultPath ?: runCatching {
-            plugin?.dataFolder?.toPath()
-                ?.relativize(file.toPath())
+            plugin.dataFolder.toPath()
+                .relativize(file.toPath())
                 .toString()
                 .replace('\\', '/')
         }.getOrNull()
@@ -98,6 +98,14 @@ class Messages(
     private val placeholderHandler = PlaceholderHandler(logger, options.parserBackend)
     private var sharedReplacements: Map<String, String> = options.sharedPlaceholders
 
+    // Paper's `Player.locale()` (Locale) replaced `Player.getLocale()` (String),
+    // but the rest of the Messages pipeline keys off a Minecraft-style locale tag
+    // (e.g. "en_us"). The legacy String accessor returns exactly that, so we
+    // keep using it behind a single suppressed accessor instead of forcing every
+    // call site to translate Locale.toLanguageTag() back into Minecraft format.
+    @Suppress("DEPRECATION")
+    private fun localeTag(sender: CommandSender?): String? = (sender as? Player)?.locale
+
     fun load() = reload()
 
     fun reload() {
@@ -114,6 +122,12 @@ class Messages(
 
     fun rawLocalized(path: String, localeTag: String?): MessageTemplate? = templateLocalized(path, localeTag)
 
+    fun rawString(path: String): String? = rawStringLocalized(path, null)
+
+    fun rawStringLocalized(path: String, localeTag: String?): String? {
+        return templateLocalized(path, localeTag)?.chatLines?.firstOrNull()
+    }
+
     fun template(path: String): MessageTemplate? = templateLocalized(path, null)
 
     fun templateLocalized(path: String, localeTag: String?): MessageTemplate? {
@@ -124,7 +138,16 @@ class Messages(
     }
 
     fun plain(path: String, player: Player? = null, replacements: Map<String, String> = emptyMap()): String? {
-        return plainLocalized(path, player?.locale, player, replacements)
+        return plainLocalized(path, localeTag(player), player, replacements)
+    }
+
+    fun plain(
+        path: String,
+        player: Player?,
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component>
+    ): String? {
+        return plainLocalized(path, localeTag(player), player, replacements, componentReplacements)
     }
 
     fun plainLocalized(
@@ -133,14 +156,37 @@ class Messages(
         player: Player? = null,
         replacements: Map<String, String> = emptyMap()
     ): String? {
+        return plainLocalized(path, localeTag, player, replacements, emptyMap())
+    }
+
+    fun plainLocalized(
+        path: String,
+        localeTag: String?,
+        player: Player?,
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component>
+    ): String? {
         val template = templateLocalized(path, localeTag) ?: return null
         val firstLine = template.chatLines.firstOrNull() ?: return null
-        return placeholderHandler.plain(firstLine, player, mergeReplacements(replacements, localeTag))
+        return placeholderHandler.plain(
+            firstLine,
+            player,
+            mergeReplacements(replacements, localeTag),
+            componentReplacements
+        )
     }
 
     fun send(sender: CommandSender, path: String, replacements: Map<String, String> = emptyMap()) {
-        val locale = (sender as? Player)?.locale
-        sendLocalized(sender, path, locale, replacements)
+        sendLocalized(sender, path, localeTag(sender), replacements)
+    }
+
+    fun send(
+        sender: CommandSender,
+        path: String,
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component>
+    ) {
+        sendLocalized(sender, path, localeTag(sender), replacements, componentReplacements)
     }
 
     fun sendLocalized(
@@ -149,8 +195,18 @@ class Messages(
         localeTag: String?,
         replacements: Map<String, String> = emptyMap()
     ) {
+        sendLocalized(sender, path, localeTag, replacements, emptyMap())
+    }
+
+    fun sendLocalized(
+        sender: CommandSender,
+        path: String,
+        localeTag: String?,
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component>
+    ) {
         val template = templateLocalized(path, localeTag) ?: return
-        deliver(sender, template, localeTag, replacements)
+        deliver(sender, template, localeTag, replacements, componentReplacements)
     }
 
     fun sendMany(
@@ -158,28 +214,63 @@ class Messages(
         path: String,
         replacements: Map<String, String> = emptyMap()
     ) {
+        sendMany(recipients, path, replacements, emptyMap())
+    }
+
+    fun sendMany(
+        recipients: Iterable<CommandSender>,
+        path: String,
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component>
+    ) {
         recipients.forEach { recipient ->
-            val locale = (recipient as? Player)?.locale
-            sendLocalized(recipient, path, locale, replacements)
+            sendLocalized(recipient, path, localeTag(recipient), replacements, componentReplacements)
         }
+    }
+
+    fun miniMessage(
+        path: String,
+        player: Player? = null,
+        replacements: Map<String, String> = emptyMap(),
+        componentReplacements: Map<String, Component> = emptyMap()
+    ): Component? {
+        return miniMessageLocalized(path, localeTag(player), player, replacements, componentReplacements)
+    }
+
+    fun miniMessageLocalized(
+        path: String,
+        localeTag: String?,
+        player: Player? = null,
+        replacements: Map<String, String> = emptyMap(),
+        componentReplacements: Map<String, Component> = emptyMap()
+    ): Component? {
+        val template = templateLocalized(path, localeTag) ?: return null
+        val firstLine = template.chatLines.firstOrNull() ?: return null
+        return placeholderHandler.component(
+            firstLine,
+            player,
+            mergeReplacements(replacements, localeTag),
+            componentReplacements
+        )
     }
 
     private fun deliver(
         sender: CommandSender,
         template: MessageTemplate,
         localeTag: String?,
-        replacements: Map<String, String>
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component> = emptyMap()
     ) {
         val merged = mergeReplacements(replacements, localeTag)
         val player = sender as? Player
-        val chatComponents = placeholderHandler.componentLines(template.chatLines, player, merged)
+        val chatComponents = placeholderHandler.componentLines(template.chatLines, player, merged, componentReplacements)
         if (chatComponents.isNotEmpty()) {
             chatComponents.forEach { sender.sendMessage(it) }
         }
 
         template.actionBar?.let { actionText ->
             if (player != null) {
-                placeholderHandler.component(actionText, player, merged)?.let { component ->
+                placeholderHandler.component(actionText, player, merged, componentReplacements)?.let { component ->
                     player.sendActionBar(component)
                 }
             }
@@ -187,8 +278,8 @@ class Messages(
 
         template.titleBar?.let { titleSpec ->
             if (player != null) {
-                val titleComponent = placeholderHandler.component(titleSpec.title, player, merged) ?: Component.empty()
-                val subtitleComponent = placeholderHandler.component(titleSpec.subtitle, player, merged) ?: Component.empty()
+                val titleComponent = placeholderHandler.component(titleSpec.title, player, merged, componentReplacements) ?: Component.empty()
+                val subtitleComponent = placeholderHandler.component(titleSpec.subtitle, player, merged, componentReplacements) ?: Component.empty()
                 val times = Title.Times.times(
                     ticksToDuration(titleSpec.fadeIn),
                     ticksToDuration(titleSpec.stay),

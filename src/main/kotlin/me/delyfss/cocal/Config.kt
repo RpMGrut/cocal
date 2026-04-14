@@ -9,6 +9,7 @@ import java.util.logging.Logger
 import me.delyfss.cocal.internal.ConfigTextRenderer
 import me.delyfss.cocal.util.FileBackups
 import kotlin.reflect.KClass
+import kotlin.reflect.KMutableProperty1
 import kotlin.reflect.KParameter
 import kotlin.reflect.KProperty1
 import kotlin.reflect.KType
@@ -80,6 +81,7 @@ class Config<T : Any>(
         val defaultConfig = parseRenderedConfig(defaultText)
 
         val existing = readConfigFile(file, defaultText)
+        @Suppress("UNCHECKED_CAST")
         val klass = prototype::class as KClass<T>
 
         val recovery = loadWithRecovery(file, defaultText, defaultConfig, existing) { merged ->
@@ -242,6 +244,23 @@ class Config<T : Any>(
         forceWrite: Boolean
     ) {
         if (!forceWrite && !options.alwaysWriteFile && file.exists()) return
+
+        // Safety guard: never overwrite an existing, non-empty file with an
+        // empty blueprint. A legitimate config object always produces at least
+        // one blueprint entry; an empty tree is a sign of a reflection failure
+        // (e.g. @Path invisible to the legacy loader on modern Kotlin — see
+        // the notes on `buildLegacyBlueprint`). Historically this produced a
+        // 0-byte file and the user lost their config; now we log and skip.
+        if (blueprint.tree.isEmpty() && file.exists() && file.length() > 0L) {
+            logger.warning(
+                "Refusing to overwrite '${file.name}' with an empty blueprint. This usually means " +
+                    "a legacy (mutable-field) config model has no @Path-annotated properties visible to " +
+                    "reflection. Check that @Path is on a property the loader can see, or migrate to a " +
+                    "data class."
+            )
+            return
+        }
+
         val orderedMap = buildOrderedMap(blueprint.tree, merged, "", blueprint.dynamicSections)
         file.writeText(renderConfig(orderedMap, blueprint.keyComments, blueprint.sectionComments))
     }
@@ -459,8 +478,9 @@ class Config<T : Any>(
         mapPath: String,
         childPath: String
     ): Enum<*> {
+        val normalized = me.delyfss.cocal.internal.BukkitEnumNormalizer.normalize(rawKey)
         return try {
-            java.lang.Enum.valueOf(enumClass, rawKey.uppercase())
+            java.lang.Enum.valueOf(enumClass, normalized)
         } catch (_: IllegalArgumentException) {
             val allowed = enumClass.enumConstants.joinToString(", ") { it.name }
             throw invalidConfigValue(
@@ -480,8 +500,9 @@ class Config<T : Any>(
         config: TypesafeConfig,
         path: String
     ): Enum<*> {
+        val normalized = me.delyfss.cocal.internal.BukkitEnumNormalizer.normalize(raw)
         return try {
-            java.lang.Enum.valueOf(enumClass, raw.uppercase())
+            java.lang.Enum.valueOf(enumClass, normalized)
         } catch (_: IllegalArgumentException) {
             val allowed = enumClass.enumConstants.joinToString(", ") { it.name }
             throw invalidConfigValue(
@@ -613,41 +634,65 @@ class Config<T : Any>(
     }
 
     private fun assignLegacyFields(config: TypesafeConfig) {
-        prototype::class.java.declaredFields.forEach { field ->
-            val annotation = field.getDeclaredAnnotation(Path::class.java) ?: return@forEach
-            val path = annotation.value
-            field.isAccessible = true
-            when {
-                field.type == Boolean::class.javaPrimitiveType ->
-                    field.setBoolean(prototype, readTyped(config, path, "BOOLEAN") { config.getBoolean(path) })
-
-                field.type == Int::class.javaPrimitiveType ->
-                    field.setInt(prototype, readTyped(config, path, "INT") { config.getInt(path) })
-
-                field.type == Long::class.javaPrimitiveType ->
-                    field.setLong(prototype, readTyped(config, path, "LONG") { config.getLong(path) })
-
-                field.type == Double::class.javaPrimitiveType ->
-                    field.setDouble(prototype, readTyped(config, path, "DOUBLE") { config.getDouble(path) })
-
-                field.type == String::class.java ->
-                    field.set(prototype, readTyped(config, path, "STRING") { config.getString(path) })
-
-                List::class.java.isAssignableFrom(field.type) -> {
-                    val typeStr = field.genericType.toString()
-                    val list = when {
-                        "String" in typeStr -> readTyped(config, path, "LIST<STRING>") { config.getStringList(path) }
-                        "Integer" in typeStr || "Int" in typeStr -> readTyped(config, path, "LIST<INT>") { config.getIntList(path) }
-                        "Boolean" in typeStr -> readTyped(config, path, "LIST<BOOLEAN>") { config.getBooleanList(path) }
-                        "Double" in typeStr -> readTyped(config, path, "LIST<DOUBLE>") { config.getDoubleList(path) }
-                        "Long" in typeStr -> readTyped(config, path, "LIST<LONG>") { config.getLongList(path) }
-                        else -> error("Unsupported list type for path '$path'")
-                    }
-                    field.set(prototype, list)
+        legacyPathProperties().forEach { entry ->
+            val path = entry.path
+            val property = entry.property
+            val erasure = property.returnType.jvmErasure
+            val value: Any? = when {
+                erasure == Boolean::class -> readTyped(config, path, "BOOLEAN") { config.getBoolean(path) }
+                erasure == Int::class -> readTyped(config, path, "INT") { config.getInt(path) }
+                erasure == Long::class -> readTyped(config, path, "LONG") { config.getLong(path) }
+                erasure == Double::class -> readTyped(config, path, "DOUBLE") { config.getDouble(path) }
+                erasure == Float::class -> readTyped(config, path, "FLOAT") { config.getDouble(path).toFloat() }
+                erasure == String::class -> readTyped(config, path, "STRING") { config.getString(path) }
+                erasure.java.isEnum -> {
+                    val raw = readTyped(config, path, "STRING") { config.getString(path) }
+                    readEnum(enumClass(erasure), raw, config, path)
                 }
 
+                List::class.java.isAssignableFrom(erasure.java) -> readList(property.returnType, config, path)
+                Set::class.java.isAssignableFrom(erasure.java) -> readList(property.returnType, config, path).toSet()
+                Map::class.java.isAssignableFrom(erasure.java) -> readMap(property.returnType, config, path)
                 else -> error("Unsupported config type for path '$path'")
             }
+
+            property.isAccessible = true
+            if (property is KMutableProperty1<*, *>) {
+                @Suppress("UNCHECKED_CAST")
+                (property as KMutableProperty1<Any, Any?>).setter.call(prototype, value)
+            } else {
+                val javaField = property.javaField
+                if (javaField == null) {
+                    logger.warning(
+                        "Property '${property.name}' has @Path(\"$path\") but is neither mutable nor backed by a field; skipping assignment."
+                    )
+                    return@forEach
+                }
+                javaField.isAccessible = true
+                javaField.set(prototype, value)
+            }
+        }
+    }
+
+    private data class LegacyPathEntry(
+        val property: KProperty1<Any, Any?>,
+        val path: String
+    )
+
+    /**
+     * Legacy (mutable-field / var-property) models may carry `@Path` on either
+     * a Java field or a Kotlin property. On Kotlin 2.3 `@Path` on a plain
+     * `var x` without `@JvmField` lands on a synthetic `getX$annotations()`
+     * method, not on the underlying field — meaning Java reflection alone
+     * misses it and the blueprint comes back empty. Use Kotlin reflection so
+     * all annotation targets are checked via `findAnnotation()`.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun legacyPathProperties(): List<LegacyPathEntry> {
+        val klass = prototype::class
+        return klass.memberProperties.mapNotNull { property ->
+            val annotation = property.findAnnotation<Path>() ?: return@mapNotNull null
+            LegacyPathEntry(property as KProperty1<Any, Any?>, annotation.value)
         }
     }
 
@@ -665,14 +710,14 @@ class Config<T : Any>(
         val dynamic = linkedSetOf<String>()
         val keyComments = linkedMapOf<String, List<String>>()
         val sectionComments = linkedMapOf<String, List<String>>()
-        prototype::class.java.declaredFields.forEach { field ->
-            val annotation = field.getDeclaredAnnotation(Path::class.java) ?: return@forEach
-            val segments = annotation.value.split('.').filter { it.isNotBlank() }
+        legacyPathProperties().forEach { entry ->
+            val property = entry.property
+            val segments = entry.path.split('.').filter { it.isNotBlank() }
             val joinedPath = segments.joinToString(".")
-            fieldComments(field)?.let { comments -> keyComments.putIfAbsent(joinedPath, comments) }
-            fieldSectionComments(field)?.let { comments -> sectionComments.putIfAbsent(joinedPath, comments) }
-            field.isAccessible = true
-            val value = field.get(prototype)
+            legacyComment(property)?.let { comments -> keyComments.putIfAbsent(joinedPath, comments) }
+            legacySectionComment(property)?.let { comments -> sectionComments.putIfAbsent(joinedPath, comments) }
+            property.isAccessible = true
+            val value = property.getter.call(prototype)
             if (value != null && value::class.isData) {
                 collectDefaults(value, segments, tree, dynamic, keyComments, sectionComments)
             } else {
@@ -682,6 +727,12 @@ class Config<T : Any>(
         }
         return Blueprint(tree, dynamic, keyComments, sectionComments)
     }
+
+    private fun legacyComment(property: KProperty1<Any, Any?>): List<String>? =
+        sanitizeComments(property.findAnnotation<Comment>()?.value)
+
+    private fun legacySectionComment(property: KProperty1<Any, Any?>): List<String>? =
+        sanitizeComments(property.findAnnotation<SectionComment>()?.value)
 
     private fun collectDefaults(
         instance: Any,

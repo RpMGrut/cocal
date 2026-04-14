@@ -53,7 +53,7 @@ internal object ConfigTextRenderer {
         sectionComments: Map<String, List<String>>
     ) {
         map.entries.forEachIndexed { index, (rawKey, value) ->
-            val key = rawKey.toString()
+            val key = rawKey
             val path = appendPath(pathPrefix, key)
             if (index > 0) {
                 out.append('\n')
@@ -69,8 +69,7 @@ internal object ConfigTextRenderer {
 
             when (value) {
                 is Map<*, *> -> {
-                    @Suppress("UNCHECKED_CAST")
-                    val child = value.mapKeys { it.key.toString() } as Map<String, Any?>
+                    val child = value.mapKeys { it.key.toString() }
                     if (child.isEmpty()) {
                         out.append(indent).append(renderKey(key)).append(" = {}")
                     } else {
@@ -112,8 +111,7 @@ internal object ConfigTextRenderer {
             is Number, is Boolean -> value.toString()
             is List<*> -> renderList(value, path, indentLevel, options, keyComments, sectionComments)
             is Map<*, *> -> {
-                @Suppress("UNCHECKED_CAST")
-                val map = value.mapKeys { it.key.toString() } as Map<String, Any?>
+                val map = value.mapKeys { it.key.toString() }
                 if (map.isEmpty()) {
                     "{}"
                 } else {
@@ -185,8 +183,7 @@ internal object ConfigTextRenderer {
     ): String {
         return when (value) {
             is Map<*, *> -> {
-                @Suppress("UNCHECKED_CAST")
-                val map = value.mapKeys { it.key.toString() } as Map<String, Any?>
+                val map = value.mapKeys { it.key.toString() }
                 if (map.isEmpty()) {
                     "{}"
                 } else {

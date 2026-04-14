@@ -141,6 +141,7 @@ class MessagesLocaleTest {
         assertTrue(messages.templateLocalized("greet", "en-US") != null)
     }
 
+    @Suppress("DEPRECATION")
     private fun createMessages(): Messages {
         return Messages.fromFile(
             fileProvider = { File(tempDir, "messages.conf") },

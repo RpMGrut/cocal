@@ -2,6 +2,8 @@ package me.delyfss.cocal.message
 
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextDecoration
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
@@ -17,20 +19,23 @@ internal class PlaceholderHandler(
     fun component(
         text: String?,
         player: Player?,
-        replacements: Map<String, String>
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component> = emptyMap()
     ): Component? {
         if (text.isNullOrEmpty()) return null
         val parsed = apply(text, player, replacements)
         if (parsed.isEmpty()) return null
         val firstLine = normalizedLines(parsed).firstOrNull() ?: return null
         if (firstLine.isEmpty()) return Component.empty()
-        return componentParser.deserialize(firstLine).decoration(TextDecoration.ITALIC, false)
+        return parseWithResolver(firstLine, componentReplacements)
+            .decoration(TextDecoration.ITALIC, false)
     }
 
     fun componentLines(
         texts: Collection<String>,
         player: Player?,
-        replacements: Map<String, String>
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component> = emptyMap()
     ): List<Component> {
         if (texts.isEmpty()) return emptyList()
         val components = ArrayList<Component>()
@@ -44,7 +49,8 @@ internal class PlaceholderHandler(
                 if (line.isEmpty()) {
                     components += Component.empty()
                 } else {
-                    components += componentParser.deserialize(line).decoration(TextDecoration.ITALIC, false)
+                    components += parseWithResolver(line, componentReplacements)
+                        .decoration(TextDecoration.ITALIC, false)
                 }
             }
         }
@@ -54,10 +60,25 @@ internal class PlaceholderHandler(
     fun plain(
         text: String?,
         player: Player?,
-        replacements: Map<String, String>
+        replacements: Map<String, String>,
+        componentReplacements: Map<String, Component> = emptyMap()
     ): String {
-        val component = component(text, player, replacements) ?: return ""
+        val component = component(text, player, replacements, componentReplacements) ?: return ""
         return plainSerializer.serialize(component)
+    }
+
+    private fun parseWithResolver(
+        text: String,
+        componentReplacements: Map<String, Component>
+    ): Component {
+        if (componentReplacements.isEmpty()) {
+            return componentParser.deserialize(text)
+        }
+        val placeholders = componentReplacements.map { (key, component) ->
+            Placeholder.component(key, component)
+        }
+        val resolver = TagResolver.resolver(placeholders)
+        return componentParser.deserialize(text, resolver)
     }
 
     private fun normalizedLines(value: String): List<String> {

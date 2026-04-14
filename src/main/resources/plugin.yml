@@ -1,0 +1,7 @@
+name: cocal
+version: ${version}
+main: me.delyfss.cocal.CocalPlugin
+api-version: '1.20'
+authors: [delyfss]
+description: Shared library plugin providing Messages, Config, Menu, Database and Redis services.
+softdepend: [PlaceholderAPI]
