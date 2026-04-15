@@ -5,7 +5,7 @@ plugins {
 
 group = "me.delyfss"
 val envVersion = System.getenv("VERSION")?.takeIf { it.isNotBlank() }
-version = envVersion ?: "1.5"
+version = envVersion ?: "1.6"
 
 repositories {
     mavenCentral()

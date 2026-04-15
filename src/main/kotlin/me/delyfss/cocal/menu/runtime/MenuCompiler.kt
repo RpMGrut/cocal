@@ -24,6 +24,11 @@ class MenuCompiler(private val logger: Logger?) {
                 key = symbol,
                 config = itemConfig,
                 actions = ActionParser.parseAll(itemConfig.actions, logger),
+                leftActions = ActionParser.parseAll(itemConfig.leftActions, logger),
+                rightActions = ActionParser.parseAll(itemConfig.rightActions, logger),
+                shiftLeftActions = ActionParser.parseAll(itemConfig.shiftLeftActions, logger),
+                shiftRightActions = ActionParser.parseAll(itemConfig.shiftRightActions, logger),
+                middleActions = ActionParser.parseAll(itemConfig.middleActions, logger),
                 denyActions = ActionParser.parseAll(itemConfig.denyActions, logger),
                 requirements = RequirementParser.parseAll(itemConfig.clickRequirements, logger)
             )

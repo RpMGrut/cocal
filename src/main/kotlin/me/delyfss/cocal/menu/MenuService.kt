@@ -188,7 +188,7 @@ class MenuService(
         val passes = item.requirements.all { req ->
             runCatching { req.test(actionContext) }.getOrElse { false }
         }
-        val actionsToRun = if (passes) item.actions else item.denyActions
+        val actionsToRun = if (passes) item.actionsFor(clickType) else item.denyActions
         actionsToRun.forEach { action ->
             runCatching { action.run(actionContext) }
                 .onFailure { ex -> logger?.warning("Menu action failed: ${ex.message}") }

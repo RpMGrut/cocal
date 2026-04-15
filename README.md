@@ -2,7 +2,14 @@
 
 Kotlin library for Paper/Spigot plugins. Provides HOCON config loading, localized MiniMessage support, a config-driven menu/GUI subsystem, Database (HikariCP), and Redis/Dragonfly (Lettuce) out of a single dependency.
 
-## What is new in 1.5
+## What is new in 1.6
+
+- **Menu per-click action lists** (DeluxeMenus parity) — each item can declare `left-actions`, `right-actions`, `shift-left-actions`, `shift-right-actions`, `middle-actions` in addition to the general `actions` fallback. See the dedicated section below.
+- **`PLAYER`-type menus** now do the full save → overwrite → restore cycle. The player's inventory is snapshot on open, replaced with menu items, and restored on close / quit / service disable.
+- **Config legacy loader** reads `@Path` through Kotlin reflection, fixing a silent 0-byte config-wipe bug that hit Kotlin 2.3+ plugins with `var`-based models. The writer also refuses to overwrite a non-empty file with an empty blueprint.
+- **Zero build warnings.**
+
+## What was added in 1.5
 
 - **Messages**
   - `rawString(path)` / `rawStringLocalized(path, locale)` — fetch the unprocessed string (no MiniMessage, no placeholders, no Adventure). Useful for logs and custom processing.
@@ -41,11 +48,11 @@ repositories {
 }
 
 dependencies {
-    compileOnly("com.github.RpMGrut:cocal:v1.5")
+    compileOnly("com.github.RpMGrut:cocal:v1.6")
 }
 ```
 
-Install `cocal-1.5.jar` into your server's `plugins/` directory. Downstream plugins then access shared services:
+Install `cocal-1.6.jar` into your server's `plugins/` directory. Downstream plugins then access shared services:
 
 ```kotlin
 import me.delyfss.cocal.Cocal
@@ -228,6 +235,51 @@ Non-chest inventories have a fixed slot count from vanilla Bukkit; the `size` fi
 | `[refresh]` | — | Re-renders the current menu |
 | `[scroll up\|down\|left\|right]` | `[step]` | Mutates `MenuContext.scrollOffset` and refreshes |
 
+### Per-click action lists (DeluxeMenus parity)
+
+Each item supports a general `actions` list plus five click-type-specific lists. When a click type has its own non-empty list, only that list runs; otherwise `actions` is the fallback.
+
+```hocon
+items {
+  K {
+    type = "diamond_sword"
+    name = "<gold>Kit"
+    actions = [
+      "[message] <gray>Pick a click: LMB=free, RMB=premium, Shift+LMB=info"
+    ]
+    left-actions = [
+      "[player] kit free"
+      "[sound] entity_experience_orb_pickup"
+    ]
+    right-actions = [
+      "[player] kit premium"
+    ]
+    shift-left-actions = [
+      "[message] <#62aef5>Kits give you a starter loadout"
+    ]
+    shift-right-actions = [
+      "[console] broadcast <player> opened the kit menu"
+    ]
+    middle-actions = [
+      "[refresh]"
+    ]
+  }
+}
+```
+
+Click → list mapping:
+
+| Bukkit `ClickType` | List used | Fallback if empty |
+|---|---|---|
+| `LEFT` | `left-actions` | `actions` |
+| `RIGHT` | `right-actions` | `actions` |
+| `SHIFT_LEFT` | `shift-left-actions` | `actions` (**not** left-actions) |
+| `SHIFT_RIGHT` | `shift-right-actions` | `actions` (**not** right-actions) |
+| `MIDDLE` | `middle-actions` | `actions` |
+| any other (number keys, drops, double-click, etc.) | — | `actions` |
+
+Same item can still declare `click-requirements` and `deny-actions`; they apply uniformly across every click type. If you need per-click permission gates, use multiple requirements/deny-actions inside the individual click lists instead.
+
 ### Custom actions
 
 ```kotlin
@@ -316,7 +368,7 @@ When `enabled = false` or the connection fails, `isAvailable` stays `false` and 
 
 ## Core plugin
 
-`cocal-1.5.jar` drops into `plugins/` like any other plugin. On first run it creates `plugins/cocal/core.conf`:
+`cocal-1.6.jar` drops into `plugins/` like any other plugin. On first run it creates `plugins/cocal/core.conf`:
 
 ```hocon
 database {
