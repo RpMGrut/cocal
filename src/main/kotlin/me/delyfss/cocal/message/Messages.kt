@@ -386,23 +386,35 @@ class Messages(
     }
 
     private fun mergeReplacements(extra: Map<String, String>, localeTag: String?): Map<String, String> {
+        // `<prefix>` is always resolved to a concrete string so it NEVER renders literally.
+        // Precedence:
+        //   * `prefix-enabled = false`  -> "" (keep the configured `prefix` value for easy re-enable)
+        //   * a non-blank config `prefix` -> that value
+        //   * else a shared placeholder named "prefix" (if the host app supplied one)
+        //   * else "" (an absent/blank prefix collapses to nothing, not the literal token)
+        val prefixEnabled = resolveLocalizedBoolean("prefix-enabled", localeTag) ?: true
         val localizedPrefix = resolveLocalizedString("prefix", localeTag)
 
-        val shared = if (localizedPrefix != null && localizedPrefix.isNotBlank()) {
-            val merged = LinkedHashMap<String, String>(sharedReplacements.size + 1)
-            merged.putAll(sharedReplacements)
-            merged["prefix"] = localizedPrefix
-            merged
-        } else {
-            sharedReplacements
+        val shared: Map<String, String> = when {
+            !prefixEnabled -> withPrefix("")
+            localizedPrefix != null && localizedPrefix.isNotBlank() -> withPrefix(localizedPrefix)
+            sharedReplacements.containsKey("prefix") -> sharedReplacements
+            else -> withPrefix("")
         }
 
-        if (shared.isEmpty()) return extra
         if (extra.isEmpty()) return shared
 
         val merged = HashMap<String, String>(shared.size + extra.size)
         merged.putAll(shared)
         merged.putAll(extra)
+        return merged
+    }
+
+    /** sharedReplacements plus a forced `prefix` entry (sharedReplacements is never mutated). */
+    private fun withPrefix(prefix: String): Map<String, String> {
+        val merged = LinkedHashMap<String, String>(sharedReplacements.size + 1)
+        merged.putAll(sharedReplacements)
+        merged["prefix"] = prefix
         return merged
     }
 
@@ -413,6 +425,19 @@ class Messages(
             val value = source.getValue(fullPath)
             if (value.valueType() == ConfigValueType.STRING) {
                 return source.getString(fullPath)
+            }
+        }
+        return null
+    }
+
+    /** Locale-aware boolean lookup (mirrors [resolveLocalizedString]); null when unset/non-boolean. */
+    private fun resolveLocalizedBoolean(path: String, localeTag: String?): Boolean? {
+        val fullPath = toFullPath(path)
+        resolveConfigChain(localeTag).forEach { source ->
+            if (!source.hasPath(fullPath)) return@forEach
+            val value = source.getValue(fullPath)
+            if (value.valueType() == ConfigValueType.BOOLEAN) {
+                return source.getBoolean(fullPath)
             }
         }
         return null
