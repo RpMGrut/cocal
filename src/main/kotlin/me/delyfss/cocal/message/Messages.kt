@@ -421,10 +421,14 @@ class Messages(
 
         val merged = HashMap<String, String>(shared.size + extra.size)
         merged.putAll(shared)
-        // Caller-supplied values are UNTRUSTED — escape MiniMessage tags so a value like a player
-        // name containing "<click:...>" or colour tags renders literally instead of being parsed
-        // as markup. Trusted config values (prefix, shared placeholders) keep their formatting.
-        extra.forEach { (key, value) -> merged[key] = escaper.escapeTags(value) }
+        // MiniMessage-tag escaping of caller values is TEMPORARILY DISABLED (cocal 1.10.1).
+        // Escaping every replacement broke every message that injects a pre-built MiniMessage
+        // fragment through a <placeholder> (help syntax, status/state fragments, nav buttons) —
+        // the tags rendered literally. Until a proper trusted/raw opt-out lands, substitute values
+        // raw (the pre-1.10 behavior). Trade-off: an untrusted value (e.g. a player-set marker
+        // label) can again inject markup — accepted for now, to be re-hardened later.
+        // extra.forEach { (key, value) -> merged[key] = escaper.escapeTags(value) }
+        extra.forEach { (key, value) -> merged[key] = value }
         return merged
     }
 

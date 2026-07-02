@@ -1,5 +1,6 @@
 import me.delyfss.cocal.message.Messages
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -9,6 +10,10 @@ import java.util.logging.Logger
  * Caller-supplied placeholder VALUES are untrusted and must not be able to inject MiniMessage tags
  * (colours, `<click>`, `<hover>`, …). They are escaped so they render literally; the trusted config
  * `prefix` keeps its formatting. Formatted values must go through component placeholders instead.
+ *
+ * NOTE: value escaping is TEMPORARILY DISABLED in cocal 1.10.1 (it broke every message that injects
+ * a pre-built MiniMessage fragment via a `<placeholder>`), so the two escaping assertions below are
+ * `@Disabled` until a trusted/raw opt-out lands and escaping is turned back on.
  */
 class MessagesInjectionTest {
 
@@ -24,6 +29,7 @@ class MessagesInjectionTest {
     }
 
     @Test
+    @Disabled("Value escaping temporarily off in cocal 1.10.1 — re-enable with the trusted/raw opt-out")
     fun `injected minimessage tags in a placeholder value render literally`() {
         val m = load(
             """
@@ -50,6 +56,7 @@ class MessagesInjectionTest {
     }
 
     @Test
+    @Disabled("Value escaping temporarily off in cocal 1.10.1 — re-enable with the trusted/raw opt-out")
     fun `trusted prefix keeps its formatting`() {
         val m = load(
             """
