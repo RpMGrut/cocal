@@ -2,6 +2,14 @@
 
 Kotlin library for Paper/Spigot plugins. Provides HOCON config loading, localized MiniMessage support, a config-driven menu/GUI subsystem, Database (HikariCP), and Redis/Dragonfly (Lettuce) out of a single dependency.
 
+## What is new in 1.9
+
+- **Clickable paginated items.** `PageSource`-backed items are now fully interactive — clicking a pagination slot compiles and runs that item's per-click action lists (and click requirements / deny actions), exactly like a static shape item. Previously page items were display-only.
+- **Placeholder persistence.** The `Map<String,String>` passed to `open(player, id, placeholders)` is stored on the `MenuSession`, so refresh, clicks, `[refresh]`, `[openmenu]` and `[back]` re-render with the SAME placeholders instead of an empty map. `[openmenu]`/`[back]` carry the current placeholders forward.
+- **Page navigation actions:** `[page next]`, `[page previous]` (`[page prev]`), `[page first]`, `[page last]` — clamp against the real page count and refresh. Pagination now also exposes the current/total page as placeholders (`PaginationConfig.currentPlaceholder` / `totalPlaceholder`, default `<page>` / `<pages>`).
+- **`[back]` history fixed** — the navigation stack now carries across `open()` calls, so back actually pops the previous menu.
+- Fully backward compatible: static menus and existing action-less page items behave exactly as before.
+
 ## What is new in 1.6
 
 - **Menu per-click action lists** (DeluxeMenus parity) — each item can declare `left-actions`, `right-actions`, `shift-left-actions`, `shift-right-actions`, `middle-actions` in addition to the general `actions` fallback. See the dedicated section below.
@@ -230,9 +238,10 @@ Non-chest inventories have a fixed slot count from vanilla Bukkit; the `size` fi
 | `[console]` | `<command>` | Runs the command as console |
 | `[message]` | `<minimessage>` | Sends a MiniMessage line to the player |
 | `[sound]` | `<name>[:volume[:pitch]]` | Plays a Bukkit `Sound` |
-| `[openmenu]` | `<id>` | Navigates to another registered menu |
-| `[back]` | — | Pops the menu history stack |
+| `[openmenu]` | `<id>` | Navigates to another registered menu (carries current placeholders) |
+| `[back]` | — | Pops the menu history stack (carries current placeholders) |
 | `[refresh]` | — | Re-renders the current menu |
+| `[page next\|previous\|first\|last]` | — | Moves through pages (clamped to the page count) and refreshes |
 | `[scroll up\|down\|left\|right]` | `[step]` | Mutates `MenuContext.scrollOffset` and refreshes |
 
 ### Per-click action lists (DeluxeMenus parity)

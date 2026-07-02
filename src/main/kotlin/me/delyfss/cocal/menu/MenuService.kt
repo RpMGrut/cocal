@@ -7,6 +7,7 @@ import me.delyfss.cocal.menu.action.CloseActionFactory
 import me.delyfss.cocal.menu.action.ConsoleCommandActionFactory
 import me.delyfss.cocal.menu.action.MessageActionFactory
 import me.delyfss.cocal.menu.action.OpenMenuActionFactory
+import me.delyfss.cocal.menu.action.PageActionFactory
 import me.delyfss.cocal.menu.action.PlayerCommandActionFactory
 import me.delyfss.cocal.menu.action.RefreshActionFactory
 import me.delyfss.cocal.menu.action.ScrollActionFactory
@@ -23,6 +24,7 @@ import me.delyfss.cocal.menu.runtime.CompiledMenu
 import me.delyfss.cocal.menu.runtime.ItemBuilder
 import me.delyfss.cocal.menu.runtime.MenuCompiler
 import me.delyfss.cocal.menu.runtime.MenuRenderer
+import me.delyfss.cocal.menu.runtime.PageSourceRegistry
 import me.delyfss.cocal.message.Messages
 import org.bukkit.Bukkit
 import org.bukkit.entity.Player
@@ -88,6 +90,11 @@ class MenuService(
                 OpenMenuActionFactory,
                 BackActionFactory,
                 RefreshActionFactory,
+                PageActionFactory("next"),
+                PageActionFactory("previous"),
+                PageActionFactory("prev"),
+                PageActionFactory("first"),
+                PageActionFactory("last"),
                 ScrollActionFactory("up"),
                 ScrollActionFactory("down"),
                 ScrollActionFactory("left"),
@@ -114,6 +121,19 @@ class MenuService(
         player: Player,
         menuId: String,
         placeholders: Map<String, String> = emptyMap()
+    ): Boolean = openInternal(player, menuId, placeholders, emptyList())
+
+    /**
+     * Shared open path. [initialHistory] seeds the new session's navigation stack — the public
+     * [open] starts empty, while [openmenu]/[back] navigation carries the stack forward so [back]
+     * works across menus. [placeholders] are stored on the session so refresh / clicks / navigation
+     * keep the same context.
+     */
+    private fun openInternal(
+        player: Player,
+        menuId: String,
+        placeholders: Map<String, String>,
+        initialHistory: List<String>
     ): Boolean {
         val compiled = registry.get(menuId) ?: run {
             logger?.warning("Cannot open unknown menu '$menuId'")
@@ -130,6 +150,8 @@ class MenuService(
         }
 
         val session = MenuSession(player, menuId)
+        session.placeholders = placeholders
+        session.history.addAll(initialHistory)
         sessions[player.uniqueId] = session
 
         val context = MenuContext(
@@ -159,7 +181,7 @@ class MenuService(
     fun refresh(player: Player) {
         val session = sessions[player.uniqueId] ?: return
         val compiled = registry.get(session.menuId) ?: return
-        val context = MenuContext(player, session.menuId, session)
+        val context = MenuContext(player, session.menuId, session, session.placeholders)
         if (compiled.config.type == MenuType.PLAYER) {
             renderer.renderIntoPlayer(compiled, context, player)
         } else {
@@ -182,7 +204,7 @@ class MenuService(
         session: MenuSession,
         item: CompiledItem
     ) {
-        val context = MenuContext(player, compiled.id, session)
+        val context = MenuContext(player, compiled.id, session, session.placeholders)
         val actionContext = ActionContext(player, clickType, context)
 
         val passes = item.requirements.all { req ->
@@ -195,6 +217,40 @@ class MenuService(
         }
 
         processPendingSessionRequests(player, compiled, session)
+    }
+
+    /**
+     * Resolves and dispatches a click on a dynamic [me.delyfss.cocal.menu.runtime.PageSource]-backed
+     * pagination slot. Unlike static shape items (pre-compiled at [registerMenu]), a page item's
+     * config is produced per-render, so its actions are compiled here on click. [slotKey] is the raw
+     * inventory slot for chest menus, or the shape slot for PLAYER menus — matching how
+     * [me.delyfss.cocal.menu.config.PaginationConfig.slots] is interpreted per type. Returns true
+     * when a page item was found and dispatched.
+     */
+    internal fun dispatchPaginatedClick(
+        player: Player,
+        clickType: ClickType,
+        compiled: CompiledMenu,
+        session: MenuSession,
+        slotKey: Int
+    ): Boolean {
+        val pagination = compiled.config.pagination ?: return false
+        val source = PageSourceRegistry.get(compiled.id) ?: return false
+        val indexInPage = pagination.slots.indexOf(slotKey)
+        if (indexInPage < 0) return false
+
+        val context = MenuContext(player, compiled.id, session, session.placeholders)
+        val total = source.size(context)
+        val pageSize = pagination.slots.size.coerceAtLeast(1)
+        val totalPages = ((total + pageSize - 1) / pageSize).coerceAtLeast(1)
+        val page = session.page.coerceIn(0, totalPages - 1)
+        val itemIndex = page * pageSize + indexInPage
+        if (itemIndex >= total) return false
+
+        val itemConfig = source.itemAt(itemIndex, context)
+        val compiledItem = compiler.compileItem(itemConfig)
+        dispatchItemClick(player, clickType, compiled, session, compiledItem)
+        return true
     }
 
     internal fun processPendingSessionRequests(
@@ -218,23 +274,26 @@ class MenuService(
                 session.backRequested = false
                 val previous = session.history.removeLastOrNull()
                 if (previous != null) {
+                    val history = session.history.toList()   // remaining stack after the pop
+                    val carried = session.placeholders
                     if (compiled.config.type == MenuType.PLAYER) {
                         // Cleanly exit this PLAYER view before opening the next.
                         restorePlayerInventory(player, session)
                         sessions.remove(player.uniqueId)
                     }
-                    open(player, previous)
+                    openInternal(player, previous, carried, history)
                 }
             }
             session.openMenuRequest != null -> {
                 val target = session.openMenuRequest!!
                 session.openMenuRequest = null
-                session.history.addLast(session.menuId)
+                val history = session.history.toList() + session.menuId
+                val carried = session.placeholders
                 if (compiled.config.type == MenuType.PLAYER) {
                     restorePlayerInventory(player, session)
                     sessions.remove(player.uniqueId)
                 }
-                open(player, target)
+                openInternal(player, target, carried, history)
             }
             session.refreshRequested -> {
                 session.refreshRequested = false
@@ -247,7 +306,7 @@ class MenuService(
         val session = sessions[player.uniqueId] ?: return
         if (session !== holder.session) return
         sessions.remove(player.uniqueId)
-        val context = MenuContext(player, session.menuId, session)
+        val context = MenuContext(player, session.menuId, session, session.placeholders)
         val actionContext = ActionContext(player, ClickType.LEFT, context)
         holder.compiled.closeActions.forEach { action ->
             runCatching { action.run(actionContext) }
@@ -269,7 +328,7 @@ class MenuService(
     private fun closePlayerMenu(player: Player, session: MenuSession, compiled: CompiledMenu) {
         restorePlayerInventory(player, session)
         sessions.remove(player.uniqueId)
-        val context = MenuContext(player, session.menuId, session)
+        val context = MenuContext(player, session.menuId, session, session.placeholders)
         val actionContext = ActionContext(player, ClickType.LEFT, context)
         compiled.closeActions.forEach { action ->
             runCatching { action.run(actionContext) }

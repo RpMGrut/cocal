@@ -61,10 +61,14 @@ class MenuProtectionListener(private val service: MenuService) : Listener {
 
         val shapeSlot = PlayerMenuSlots.inventoryToShape(event.slot)
         if (shapeSlot < 0) return
-        val symbol = compiled.shapeSlots[shapeSlot] ?: return
-        val item = compiled.compiledItems[symbol] ?: return
-
-        service.dispatchItemClick(player, event.click, compiled, session, item)
+        // Static shape item wins; otherwise try a dynamic paginated item at this shape slot.
+        val symbol = compiled.shapeSlots[shapeSlot]
+        if (symbol != null) {
+            val item = compiled.compiledItems[symbol] ?: return
+            service.dispatchItemClick(player, event.click, compiled, session, item)
+            return
+        }
+        service.dispatchPaginatedClick(player, event.click, compiled, session, shapeSlot)
     }
 
     private fun handleChestClick(event: InventoryClickEvent, player: Player, holder: MenuHolder) {
@@ -74,10 +78,14 @@ class MenuProtectionListener(private val service: MenuService) : Listener {
         val clickedSlot = event.rawSlot
         if (clickedSlot !in 0 until event.inventory.size) return
 
-        val symbol = holder.compiled.shapeSlots[clickedSlot] ?: return
-        val item = holder.compiled.compiledItems[symbol] ?: return
-
-        service.dispatchItemClick(player, event.click, holder.compiled, holder.session, item)
+        // Static shape item wins; otherwise try a dynamic paginated item at this raw slot.
+        val symbol = holder.compiled.shapeSlots[clickedSlot]
+        if (symbol != null) {
+            val item = holder.compiled.compiledItems[symbol] ?: return
+            service.dispatchItemClick(player, event.click, holder.compiled, holder.session, item)
+            return
+        }
+        service.dispatchPaginatedClick(player, event.click, holder.compiled, holder.session, clickedSlot)
     }
 
     private fun debounce(player: Player): Boolean {

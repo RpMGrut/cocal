@@ -94,6 +94,23 @@ internal object RefreshActionFactory : ActionFactory {
     }
 }
 
+internal class PageActionFactory(private val direction: String) : ActionFactory {
+    override val tag = "page $direction"
+    override fun create(argument: String): Action = object : Action {
+        override fun run(context: ActionContext) {
+            val session = context.menu.session
+            val before = session.page
+            when (direction) {
+                "next" -> if (session.page < session.pageCount - 1) session.page += 1
+                "previous", "prev" -> if (session.page > 0) session.page -= 1
+                "first" -> session.page = 0
+                "last" -> session.page = (session.pageCount - 1).coerceAtLeast(0)
+            }
+            if (session.page != before) session.refreshRequested = true
+        }
+    }
+}
+
 internal class ScrollActionFactory(private val direction: String) : ActionFactory {
     override val tag = "scroll $direction"
     override fun create(argument: String): Action = object : Action {

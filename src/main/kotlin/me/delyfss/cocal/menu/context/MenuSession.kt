@@ -20,6 +20,16 @@ class MenuSession(
     var openMenuRequest: String? = null
     var backRequested: Boolean = false
 
+    /**
+     * String placeholders supplied to [me.delyfss.cocal.menu.MenuService.open] for this view.
+     * Persisted here so refresh / paging / clicks / navigation re-render with the SAME context
+     * (e.g. a `<town>` supplied on open stays resolved) instead of an empty map.
+     */
+    var placeholders: Map<String, String> = emptyMap()
+
+    /** Total page count computed by the renderer for the current view; used to clamp page navigation. */
+    var pageCount: Int = 1
+
     /** Stack of menu ids the player has navigated through — used by [back] action. */
     val history: ArrayDeque<String> = ArrayDeque()
 
