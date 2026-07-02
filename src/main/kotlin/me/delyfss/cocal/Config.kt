@@ -11,6 +11,7 @@ import me.delyfss.cocal.util.FileBackups
 import kotlin.reflect.KClass
 import kotlin.reflect.KMutableProperty1
 import kotlin.reflect.KParameter
+import kotlin.reflect.KFunction
 import kotlin.reflect.KProperty1
 import kotlin.reflect.KType
 import kotlin.reflect.full.findAnnotation
@@ -19,6 +20,7 @@ import kotlin.reflect.full.primaryConstructor
 import kotlin.reflect.jvm.isAccessible
 import kotlin.reflect.jvm.javaField
 import kotlin.reflect.jvm.jvmErasure
+import kotlin.time.toKotlinDuration
 
 class Config<T : Any>(
     private val folder: File,
@@ -64,6 +66,11 @@ class Config<T : Any>(
 
     private val logger: Logger = Logger.getLogger(Config::class.java.name)
 
+    /** Cached (primary constructor, name→property) per data class — see [instantiateAnyDataClass]. */
+    private val classMeta =
+        java.util.concurrent.ConcurrentHashMap<KClass<*>, Pair<KFunction<Any>, Map<String, KProperty1<*, *>>>>()
+
+    @Synchronized
     fun load(): T {
         return if (prototype::class.isData) {
             loadDataClass()
@@ -164,10 +171,13 @@ class Config<T : Any>(
                     }
                 }
             } catch (ex: Exception) {
-                restoreFromInvalidValues(file, defaultText, ex)
-                merged = ConfigFactory.parseFile(file).withFallback(defaultConfig).resolve()
-                val loaded = instantiate(merged)
-                return RecoveryResult(loaded, merged, true)
+                // A non-data error here is a schema/programmer bug (e.g. an unsupported config type),
+                // NOT corrupt user data. Do NOT destroy the user's file — surface the error instead.
+                logger.severe(
+                    "Failed to load '${file.name}': ${ex.message ?: ex::class.simpleName}. " +
+                        "Leaving the existing config untouched."
+                )
+                throw ex
             }
         }
     }
@@ -262,7 +272,31 @@ class Config<T : Any>(
         }
 
         val orderedMap = buildOrderedMap(blueprint.tree, merged, "", blueprint.dynamicSections)
-        file.writeText(renderConfig(orderedMap, blueprint.keyComments, blueprint.sectionComments))
+        writeAtomically(file, renderConfig(orderedMap, blueprint.keyComments, blueprint.sectionComments))
+    }
+
+    /** Writes via a temp file + atomic rename so a crash mid-write can't truncate the live config. */
+    private fun writeAtomically(file: File, text: String) {
+        val tmp = File(file.parentFile ?: File("."), "${file.name}.tmp")
+        tmp.writeText(text)
+        val moved = runCatching {
+            java.nio.file.Files.move(
+                tmp.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
+        }.isSuccess
+        if (!moved) {
+            runCatching {
+                java.nio.file.Files.move(
+                    tmp.toPath(), file.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                )
+            }.onFailure {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+        }
     }
 
     private fun buildOrderedMap(
@@ -325,10 +359,17 @@ class Config<T : Any>(
         config: TypesafeConfig,
         prefix: String
     ): Any {
-        val ctor = klass.primaryConstructor
-            ?: error("Data class ${klass.simpleName} must have a primary constructor")
+        // Cache primary-constructor + property lookup per class; recomputed-per-element reflection
+        // (once per list entry, per save) is otherwise a measurable cost for List<DataClass> configs.
+        val meta = classMeta.getOrPut(klass) {
+            val c = klass.primaryConstructor
+                ?: error("Data class ${klass.simpleName} must have a primary constructor")
+            @Suppress("UNCHECKED_CAST")
+            (c as KFunction<Any>) to klass.memberProperties.associateBy { it.name }
+        }
+        val ctor = meta.first
+        val properties = meta.second
         val params = mutableMapOf<KParameter, Any?>()
-        val properties = klass.memberProperties.associateBy { it.name }
 
         ctor.parameters.forEach { param ->
             val property = properties[param.name]
@@ -364,6 +405,23 @@ class Config<T : Any>(
                 val raw = readTyped(config, path, "STRING") { config.getString(path) }
                 readEnum(enumClass(erasure), raw, config, path)
             }
+
+            erasure == java.util.UUID::class -> {
+                val raw = readTyped(config, path, "STRING") { config.getString(path) }
+                runCatching { java.util.UUID.fromString(raw.trim()) }.getOrElse {
+                    throw invalidConfigValue(
+                        config = config,
+                        displayPath = path,
+                        recoveryPath = path,
+                        reason = "Invalid UUID '$raw'",
+                        rawValueOverride = raw
+                    )
+                }
+            }
+            erasure == java.time.Duration::class ->
+                readTyped(config, path, "DURATION") { config.getDuration(path) }
+            erasure == kotlin.time.Duration::class ->
+                readTyped(config, path, "DURATION") { config.getDuration(path).toKotlinDuration() }
 
             erasure == List::class -> readList(type, config, path)
             erasure == MutableList::class -> readList(type, config, path).toMutableList()

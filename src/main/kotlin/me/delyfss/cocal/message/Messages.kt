@@ -93,10 +93,22 @@ class Messages(
         val parserBackend: ParserBackend = ParserBackend.MINI_MESSAGE
     )
 
-    private var config: Config = ConfigFactory.empty()
-    private var localeConfigs: Map<String, Config> = emptyMap()
+    // @Volatile: reload() reassigns these wholesale (often from a command thread) while send/plain
+    // read them from other threads — publish the new references safely.
+    @Volatile private var config: Config = ConfigFactory.empty()
+    @Volatile private var localeConfigs: Map<String, Config> = emptyMap()
     private val placeholderHandler = PlaceholderHandler(logger, options.parserBackend)
-    private var sharedReplacements: Map<String, String> = options.sharedPlaceholders
+    @Volatile private var sharedReplacements: Map<String, String> = options.sharedPlaceholders
+
+    /**
+     * Optional per-player locale override. When set, its result (a Minecraft locale tag like
+     * "ru_ru", or null to fall through) is used instead of the client locale — lets servers back
+     * language choice with a `/language` command + DB flag. Set by the host plugin.
+     */
+    @Volatile
+    var localeResolver: ((CommandSender) -> String?)? = null
+
+    private val escaper = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage()
 
     // Paper's `Player.locale()` (Locale) replaced `Player.getLocale()` (String),
     // but the rest of the Messages pipeline keys off a Minecraft-style locale tag
@@ -104,7 +116,10 @@ class Messages(
     // keep using it behind a single suppressed accessor instead of forcing every
     // call site to translate Locale.toLanguageTag() back into Minecraft format.
     @Suppress("DEPRECATION")
-    private fun localeTag(sender: CommandSender?): String? = (sender as? Player)?.locale
+    private fun localeTag(sender: CommandSender?): String? {
+        if (sender != null) localeResolver?.invoke(sender)?.let { return it }
+        return (sender as? Player)?.locale
+    }
 
     fun load() = reload()
 
@@ -406,7 +421,10 @@ class Messages(
 
         val merged = HashMap<String, String>(shared.size + extra.size)
         merged.putAll(shared)
-        merged.putAll(extra)
+        // Caller-supplied values are UNTRUSTED — escape MiniMessage tags so a value like a player
+        // name containing "<click:...>" or colour tags renders literally instead of being parsed
+        // as markup. Trusted config values (prefix, shared placeholders) keep their formatting.
+        extra.forEach { (key, value) -> merged[key] = escaper.escapeTags(value) }
         return merged
     }
 
@@ -533,6 +551,9 @@ class Messages(
         private const val DEFAULT_STAY = 70
         private const val DEFAULT_FADE_OUT = 20
         private const val DEFAULT_FALLBACK_LOCALE = "en-US"
+        // Precompiled once (normalizeLocaleTag runs several times per message send).
+        private val LANGUAGE_PATTERN = Regex("[a-z]{2,8}")
+        private val REGION_PATTERN = Regex("[A-Z0-9]{2,8}")
 
         fun fromFile(
             fileProvider: () -> File,
@@ -744,11 +765,11 @@ class Messages(
             if (parts.isEmpty()) return null
 
             val language = parts.first().lowercase()
-            if (!language.matches(Regex("[a-z]{2,8}"))) return null
+            if (!language.matches(LANGUAGE_PATTERN)) return null
             if (parts.size == 1) return language
 
             val region = parts[1].uppercase()
-            if (!region.matches(Regex("[A-Z0-9]{2,8}"))) return null
+            if (!region.matches(REGION_PATTERN)) return null
             return "$language-$region"
         }
     }

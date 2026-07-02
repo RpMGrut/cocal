@@ -3,11 +3,13 @@ package me.delyfss.cocal
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.logging.Logger
 import kotlin.collections.linkedMapOf
 import kotlin.reflect.full.declaredMemberProperties
 import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.jvm.isAccessible
 import kotlin.reflect.jvm.javaField
+import kotlin.reflect.jvm.jvmErasure
 import me.delyfss.cocal.internal.ConfigTextRenderer
 
 abstract class DynamicConfig(
@@ -56,7 +58,95 @@ abstract class DynamicConfig(
         folder.mkdirs()
         val file = File(folder, fileName)
         val blueprint = buildCurrentBlueprint()
-        file.writeText(renderConfig(blueprint))
+        writeAtomically(file, renderConfig(blueprint))
+    }
+
+    /**
+     * Reads the existing config file into this instance's fields (scalars, enums and string/number/
+     * boolean lists). Missing keys keep their code defaults. Call once before using the config so
+     * user edits survive restarts; if the file is absent it is created with defaults.
+     *
+     * Nested data-class fields are not read back (they still write); keep DynamicConfig models flat.
+     */
+    @Synchronized
+    fun load() {
+        if (closed) return
+        folder.mkdirs()
+        val file = File(folder, fileName)
+        if (!file.exists()) {
+            save()
+            return
+        }
+        val parsed = runCatching {
+            com.typesafe.config.ConfigFactory.parseFile(file).resolve()
+        }.getOrElse {
+            Logger.getLogger(DynamicConfig::class.java.name)
+                .warning("Failed to read '$fileName': ${it.message}; using defaults")
+            return
+        }
+        properties.forEach { prop ->
+            val mutable = prop as? kotlin.reflect.KMutableProperty1<*, *> ?: return@forEach
+            val path = (pathAnnotation(prop)?.value ?: prop.name)
+            if (!parsed.hasPath(path)) return@forEach
+            val value = runCatching { readDynamicValue(parsed, path, prop) }.getOrNull() ?: return@forEach
+            @Suppress("UNCHECKED_CAST")
+            runCatching { (mutable as kotlin.reflect.KMutableProperty1<Any, Any?>).setter.call(this, value) }
+        }
+        // Normalize the file (adds any keys the user is missing) after loading known values.
+        save()
+    }
+
+    private fun readDynamicValue(
+        parsed: com.typesafe.config.Config,
+        path: String,
+        prop: kotlin.reflect.KProperty1<*, *>
+    ): Any? {
+        val erasure = prop.returnType.jvmErasure
+        return when {
+            erasure == String::class -> parsed.getString(path)
+            erasure == Int::class -> parsed.getInt(path)
+            erasure == Long::class -> parsed.getLong(path)
+            erasure == Double::class -> parsed.getDouble(path)
+            erasure == Float::class -> parsed.getDouble(path).toFloat()
+            erasure == Boolean::class -> parsed.getBoolean(path)
+            erasure.java.isEnum -> {
+                val raw = me.delyfss.cocal.internal.BukkitEnumNormalizer.normalize(parsed.getString(path))
+                @Suppress("UNCHECKED_CAST")
+                runCatching { java.lang.Enum.valueOf(erasure.java as Class<out Enum<*>>, raw) }.getOrNull()
+            }
+            erasure == List::class || erasure == Set::class -> {
+                val element = prop.returnType.arguments.firstOrNull()?.type?.jvmErasure
+                val list: List<Any?> = when (element) {
+                    Int::class -> parsed.getIntList(path)
+                    Long::class -> parsed.getLongList(path)
+                    Double::class -> parsed.getDoubleList(path)
+                    Boolean::class -> parsed.getBooleanList(path)
+                    else -> parsed.getStringList(path)
+                }
+                if (erasure == Set::class) list.toSet() else list
+            }
+            else -> null   // nested/complex types are not read back (see [load] doc)
+        }
+    }
+
+    private fun writeAtomically(file: File, text: String) {
+        val tmp = File(file.parentFile ?: File("."), "${file.name}.tmp")
+        tmp.writeText(text)
+        val moved = runCatching {
+            java.nio.file.Files.move(
+                tmp.toPath(), file.toPath(),
+                java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING
+            )
+        }.isSuccess
+        if (!moved) {
+            runCatching {
+                java.nio.file.Files.move(tmp.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }.onFailure {
+                tmp.copyTo(file, overwrite = true)
+                tmp.delete()
+            }
+        }
     }
 
     private fun buildCurrentBlueprint(): Blueprint {

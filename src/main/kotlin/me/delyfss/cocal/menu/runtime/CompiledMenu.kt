@@ -31,7 +31,9 @@ class CompiledItem(
     val shiftRightActions: List<Action>,
     val middleActions: List<Action>,
     val denyActions: List<Action>,
-    val requirements: List<Requirement>
+    val requirements: List<Requirement>,
+    /** Requirements gating whether the item RENDERS at all (evaluated by the renderer). */
+    val viewRequirements: List<Requirement> = emptyList()
 ) {
     /**
      * Returns the action list that should run for [clickType], following

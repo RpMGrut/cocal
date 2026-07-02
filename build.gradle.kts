@@ -5,11 +5,10 @@ plugins {
 
 group = "me.delyfss"
 val envVersion = System.getenv("VERSION")?.takeIf { it.isNotBlank() }
-version = envVersion ?: "1.9"
+version = envVersion ?: "1.10"
 
 repositories {
     mavenCentral()
-    maven("https://repo.nekroplex.com/releases")
     maven("https://repo.extendedclip.com/content/repositories/placeholderapi/")
     maven("https://hub.spigotmc.org/nexus/content/repositories/snapshots/")
     maven("https://oss.sonatype.org/content/repositories/snapshots/")
@@ -19,7 +18,6 @@ repositories {
 dependencies {
     implementation("com.typesafe:config:1.4.3")
     implementation(kotlin("reflect"))
-    implementation("gg.aquatic:QuickMiniMessage:26.0.3")
     implementation("net.kyori:adventure-text-minimessage:4.25.0")
     implementation("net.kyori:adventure-text-serializer-plain:4.25.0")
 
@@ -56,6 +54,11 @@ tasks.shadowJar {
     relocate("com.typesafe.config", "me.delyfss.cocal.shaded.typesafe")
     mergeServiceFiles()
 }
+
+// The default `jar` and `shadowJar` both write cocal-<version>.jar (shadow sets classifier ""),
+// so the thin jar can clobber the fat one depending on task order. Disable the plain jar — the
+// shaded jar is the only artifact we ship.
+tasks.named("jar") { enabled = false }
 
 tasks.build {
     dependsOn("shadowJar")

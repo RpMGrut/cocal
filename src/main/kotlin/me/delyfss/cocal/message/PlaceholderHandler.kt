@@ -67,12 +67,20 @@ internal class PlaceholderHandler(
         return plainSerializer.serialize(component)
     }
 
+    private val deserializeCache = java.util.concurrent.ConcurrentHashMap<String, Component>()
+
     private fun parseWithResolver(
         text: String,
         componentReplacements: Map<String, Component>
     ): Component {
         if (componentReplacements.isEmpty()) {
-            return componentParser.deserialize(text)
+            // deserialize(text) is a pure function of `text`; memoize it (Components are immutable,
+            // so sharing a cached instance is safe — callers only derive new ones from it).
+            deserializeCache[text]?.let { return it }
+            val parsed = componentParser.deserialize(text)
+            if (deserializeCache.size >= DESERIALIZE_CACHE_LIMIT) deserializeCache.clear()
+            deserializeCache[text] = parsed
+            return parsed
         }
         val placeholders = componentReplacements.map { (key, component) ->
             Placeholder.component(key, component)
@@ -115,34 +123,30 @@ internal class PlaceholderHandler(
     }
 
     private fun isPlaceholderApiAvailable(): Boolean {
-        val cached = papiPresent
-        if (cached != null) return cached
-        val present = try {
-            Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")
-                    && placeholderBridge() != null
+        // Re-checked every call (a cheap plugin-manager lookup) so PAPI loading AFTER this handler
+        // is first used isn't permanently cached as "absent" for the whole server session.
+        return try {
+            Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI") && placeholderBridge() != null
         } catch (_: Throwable) {
             false
         }
-        papiPresent = present
-        return present
     }
 
     companion object {
+        private const val DESERIALIZE_CACHE_LIMIT = 1024
         private val NEWLINE_PATTERN = Regex("(?i)<newline>")
-        @Volatile
-        private var papiPresent: Boolean? = null
         @Volatile
         private var cachedBridge: PlaceholderBridge? = null
 
         private fun placeholderBridge(): PlaceholderBridge? {
-            val existing = cachedBridge
-            if (existing != null) return existing
+            cachedBridge?.let { return it }
+            // Only cache a SUCCESSFUL lookup — if PAPI isn't loaded yet, retry on the next call.
             val bridge = runCatching {
                 val clazz = Class.forName("me.clip.placeholderapi.PlaceholderAPI")
                 val method = clazz.getMethod("setPlaceholders", Player::class.java, String::class.java)
                 PlaceholderBridge(method)
             }.getOrNull()
-            cachedBridge = bridge
+            if (bridge != null) cachedBridge = bridge
             return bridge
         }
 

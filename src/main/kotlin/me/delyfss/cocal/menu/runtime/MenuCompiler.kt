@@ -55,6 +55,7 @@ class MenuCompiler(private val logger: Logger?) {
         shiftRightActions = ActionParser.parseAll(config.shiftRightActions, logger),
         middleActions = ActionParser.parseAll(config.middleActions, logger),
         denyActions = ActionParser.parseAll(config.denyActions, logger),
-        requirements = RequirementParser.parseAll(config.clickRequirements, logger)
+        requirements = RequirementParser.parseAll(config.clickRequirements, logger),
+        viewRequirements = RequirementParser.parseAll(config.viewRequirements, logger)
     )
 }

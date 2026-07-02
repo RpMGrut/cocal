@@ -30,6 +30,9 @@ class MenuSession(
     /** Total page count computed by the renderer for the current view; used to clamp page navigation. */
     var pageCount: Int = 1
 
+    /** Server tick of the last auto-update refresh (see [me.delyfss.cocal.menu.config.MenuConfig.updateInterval]). */
+    var lastAutoUpdateTick: Long = 0
+
     /** Stack of menu ids the player has navigated through — used by [back] action. */
     val history: ArrayDeque<String> = ArrayDeque()
 

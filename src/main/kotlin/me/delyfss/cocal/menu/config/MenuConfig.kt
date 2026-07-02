@@ -9,7 +9,9 @@ data class MenuConfig(
     val pagination: PaginationConfig? = null,
     val scroll: ScrollConfig? = null,
     val openActions: List<String> = emptyList(),
-    val closeActions: List<String> = emptyList()
+    val closeActions: List<String> = emptyList(),
+    /** Auto-refresh period in server ticks for live/animated menus. 0 disables auto-update. */
+    val updateInterval: Long = 0
 )
 
 data class PaginationConfig(

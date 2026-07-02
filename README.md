@@ -2,6 +2,34 @@
 
 Kotlin library for Paper/Spigot plugins. Provides HOCON config loading, localized MiniMessage support, a config-driven menu/GUI subsystem, Database (HikariCP), and Redis/Dragonfly (Lettuce) out of a single dependency.
 
+## What is new in 1.10
+
+A broad hardening + feature pass across every subsystem (all backward compatible).
+
+**Menu**
+- Menu **actions now resolve placeholders** — `[message]`, `[console]`, `[player]`, `[player-op]`, `[openmenu]` substitute the menu's `<key>` placeholders at click time (previously verbatim), so dynamic `PageSource` items can parameterize their commands/messages.
+- Menu **title** is now placeholder-resolved (incl. `<page>`/`<pages>`).
+- New `[player-op]` action (runs a command with a temporary wildcard permission, always removed after).
+- **Player-head** items (`head = <name|uuid>`) and **view requirements** (`view-requirements` — a failing item isn't rendered, not just click-gated).
+- **Auto-update / animated menus** via `MenuConfig.updateInterval` (ticks); refresh re-renders **in place** (no close/open flicker).
+- `PageSourceRegistry` bindings are released on `unregisterMenu`/`disable` (no leak across `/reload`); navigation history is capped; paginated clicks cache their compiled actions; off-main-thread calls warn.
+
+**Messages**
+- **Security:** untrusted placeholder VALUES are MiniMessage-escaped (no `<click>`/colour injection via e.g. player names); trusted `prefix`/shared placeholders keep formatting. Use component placeholders for formatted values.
+- Thread-safety (`@Volatile` reloadable state), PlaceholderAPI availability re-checked each call (no permanent "absent" poisoning), a pluggable per-player `localeResolver`, a bounded parsed-Component cache, and precompiled locale regexes.
+
+**Database**
+- Async API (`withConnectionAsync`/`transactionAsync`/`queryAsync`/`updateAsync`), `query`/`queryOne`/`update`/`executeBatch` helpers, nested-connection reuse (fixes SQLite pool-size-1 deadlock), a `migrate(namespace, migrations)` runner, `@Volatile` pool, driver class + SQLite parent-dir creation.
+
+**Redis**
+- Per-listener unsubscribe refcount (one plugin's unsubscribe no longer kills the channel for others), background non-blocking connect with retry, key namespacing (`keyPrefix`), pattern subscribe (`psubscribe`), typed `getObject`/`setObject`, bounded request queue, idempotent start.
+
+**Config**
+- Atomic writes (temp + rename — no truncation on crash), recovery no longer destroys a live config on a schema/programmer error, `UUID`/`Duration` field support, cached reflection metadata, synchronized `load()`. `DynamicConfig` now **reads** the existing file (was write-only).
+
+**Build**
+- Dropped the flaky `QuickMiniMessage` dependency + its single-mirror repo (it broke jitpack/CI and had no TagResolver API); `QUICK_MINI_MESSAGE` aliases MiniMessage. Disabled the plain `jar` task so it can't overwrite the shaded fat jar.
+
 ## What is new in 1.9
 
 - **Clickable paginated items.** `PageSource`-backed items are now fully interactive — clicking a pagination slot compiles and runs that item's per-click action lists (and click requirements / deny actions), exactly like a static shape item. Previously page items were display-only.
@@ -235,6 +263,7 @@ Non-chest inventories have a fixed slot count from vanilla Bukkit; the `size` fi
 |---|---|---|
 | `[close]` | — | Closes the menu for the clicker |
 | `[player]` | `<command>` | Runs the command as the player |
+| `[player-op]` | `<command>` | Runs the command as the player with a temporary wildcard permission (removed after) |
 | `[console]` | `<command>` | Runs the command as console |
 | `[message]` | `<minimessage>` | Sends a MiniMessage line to the player |
 | `[sound]` | `<name>[:volume[:pitch]]` | Plays a Bukkit `Sound` |

@@ -24,6 +24,16 @@ data class MenuItemConfig(
     val amount: Int = 1,
     val customModelData: Int = 0,
     val glow: Boolean = false,
+    /**
+     * Player-head source when [type] is a PLAYER_HEAD: either a player name (`Notch`, or a `<key>`
+     * placeholder resolving to one) or a Base64 texture value. Ignored for non-head materials.
+     */
+    val head: String = "",
+    /**
+     * Requirements evaluated at RENDER time — an item whose view requirements fail is not shown
+     * (unlike [clickRequirements], which only gate the click). Uses the same tag syntax.
+     */
+    val viewRequirements: List<String> = emptyList(),
     val actions: List<String> = emptyList(),
     val leftActions: List<String> = emptyList(),
     val rightActions: List<String> = emptyList(),

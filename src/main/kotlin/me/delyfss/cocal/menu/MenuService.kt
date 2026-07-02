@@ -9,10 +9,12 @@ import me.delyfss.cocal.menu.action.MessageActionFactory
 import me.delyfss.cocal.menu.action.OpenMenuActionFactory
 import me.delyfss.cocal.menu.action.PageActionFactory
 import me.delyfss.cocal.menu.action.PlayerCommandActionFactory
+import me.delyfss.cocal.menu.action.PlayerOpCommandActionFactory
 import me.delyfss.cocal.menu.action.RefreshActionFactory
 import me.delyfss.cocal.menu.action.ScrollActionFactory
 import me.delyfss.cocal.menu.action.SoundActionFactory
 import me.delyfss.cocal.menu.config.MenuConfig
+import me.delyfss.cocal.menu.config.MenuItemConfig
 import me.delyfss.cocal.menu.config.MenuType
 import me.delyfss.cocal.menu.context.MenuContext
 import me.delyfss.cocal.menu.context.MenuSession
@@ -54,6 +56,14 @@ class MenuService(
     private val sessions = ConcurrentHashMap<UUID, MenuSession>()
     private var enabled = false
     private var listener: MenuProtectionListener? = null
+    private var updateTask: org.bukkit.scheduler.BukkitTask? = null
+
+    /** Cache of compiled dynamic (PageSource) items, keyed by the item config value. Bounded. */
+    private val pageItemCache = ConcurrentHashMap<MenuItemConfig, CompiledItem>()
+    private val pageItemCacheLimit = 512
+
+    /** How often (ticks) the auto-update task ticks; per-menu [MenuConfig.updateInterval] gates work. */
+    private val updateTaskPeriodTicks = 20L
 
     fun enable() {
         if (enabled) {
@@ -66,17 +76,40 @@ class MenuService(
         val protection = MenuProtectionListener(this)
         Bukkit.getPluginManager().registerEvents(protection, plugin)
         listener = protection
+
+        // Drives per-menu auto-refresh (MenuConfig.updateInterval) for animated / live menus.
+        updateTask = Bukkit.getScheduler().runTaskTimer(plugin, Runnable { tickAutoUpdates() }, updateTaskPeriodTicks, updateTaskPeriodTicks)
         enabled = true
     }
 
     fun disable() {
         if (!enabled) return
+        updateTask?.cancel()
+        updateTask = null
         closeAllSessions()
+        // Release PageSources bound for our menus so consumer plugins aren't leaked across /reload.
+        registry.ids().forEach { PageSourceRegistry.unbind(it) }
         registry.clear()
+        pageItemCache.clear()
         enabled = false
         // Listener is tied to the plugin lifecycle — Bukkit unregisters it on
         // plugin disable automatically.
         listener = null
+    }
+
+    private fun tickAutoUpdates() {
+        if (sessions.isEmpty()) return
+        val nowTick = plugin.server.currentTick.toLong()
+        sessions.forEach { (uuid, session) ->
+            val compiled = registry.get(session.menuId) ?: return@forEach
+            val interval = compiled.config.updateInterval
+            if (interval <= 0) return@forEach
+            if (nowTick - session.lastAutoUpdateTick < interval) return@forEach
+            val player = Bukkit.getPlayer(uuid) ?: return@forEach
+            session.lastAutoUpdateTick = nowTick
+            runCatching { refresh(player) }
+                .onFailure { ex -> logger?.warning("Auto-update for menu '${session.menuId}' failed: ${ex.message}") }
+        }
     }
 
     private fun registerBuiltinActions() {
@@ -84,6 +117,7 @@ class MenuService(
             listOf(
                 CloseActionFactory,
                 PlayerCommandActionFactory,
+                PlayerOpCommandActionFactory(plugin),
                 ConsoleCommandActionFactory,
                 MessageActionFactory,
                 SoundActionFactory(logger),
@@ -110,6 +144,7 @@ class MenuService(
 
     fun unregisterMenu(id: String) {
         registry.unregister(id)
+        PageSourceRegistry.unbind(id)
     }
 
     fun menu(id: String): CompiledMenu? = registry.get(id)
@@ -129,12 +164,19 @@ class MenuService(
      * works across menus. [placeholders] are stored on the session so refresh / clicks / navigation
      * keep the same context.
      */
+    private fun warnIfOffMain(op: String) {
+        if (!Bukkit.isPrimaryThread()) {
+            logger?.warning("MenuService.$op called off the main thread — Bukkit inventory calls must run on the main thread")
+        }
+    }
+
     private fun openInternal(
         player: Player,
         menuId: String,
         placeholders: Map<String, String>,
         initialHistory: List<String>
     ): Boolean {
+        warnIfOffMain("open")
         val compiled = registry.get(menuId) ?: run {
             logger?.warning("Cannot open unknown menu '$menuId'")
             return false
@@ -151,7 +193,9 @@ class MenuService(
 
         val session = MenuSession(player, menuId)
         session.placeholders = placeholders
-        session.history.addAll(initialHistory)
+        // Cap history so repeated back-and-forth navigation (A→B→A→…) can't grow it without bound.
+        val bounded = if (initialHistory.size > MAX_HISTORY) initialHistory.takeLast(MAX_HISTORY) else initialHistory
+        session.history.addAll(bounded)
         sessions[player.uniqueId] = session
 
         val context = MenuContext(
@@ -179,14 +223,22 @@ class MenuService(
     }
 
     fun refresh(player: Player) {
+        warnIfOffMain("refresh")
         val session = sessions[player.uniqueId] ?: return
         val compiled = registry.get(session.menuId) ?: return
         val context = MenuContext(player, session.menuId, session, session.placeholders)
         if (compiled.config.type == MenuType.PLAYER) {
             renderer.renderIntoPlayer(compiled, context, player)
+            return
+        }
+        // Re-render into the already-open inventory when possible (no flicker / no close+open
+        // event churn for page nav, scroll and auto-update); fall back to reopening otherwise.
+        val top = player.openInventory.topInventory
+        val holder = top.holder
+        if (holder is MenuHolder && holder.session === session && top.size == compiled.config.size) {
+            renderer.renderInto(top, compiled, context)
         } else {
-            val inventory = renderer.render(compiled, context)
-            player.openInventory(inventory)
+            player.openInventory(renderer.render(compiled, context))
         }
     }
 
@@ -248,7 +300,12 @@ class MenuService(
         if (itemIndex >= total) return false
 
         val itemConfig = source.itemAt(itemIndex, context)
-        val compiledItem = compiler.compileItem(itemConfig)
+        // Memoize per config value: identical page items (data-class equality) reuse their parsed
+        // actions/requirements instead of re-running the parser on every click.
+        val compiledItem = pageItemCache[itemConfig] ?: compiler.compileItem(itemConfig).also {
+            if (pageItemCache.size >= pageItemCacheLimit) pageItemCache.clear()
+            pageItemCache[itemConfig] = it
+        }
         dispatchItemClick(player, clickType, compiled, session, compiledItem)
         return true
     }
@@ -356,5 +413,10 @@ class MenuService(
             }
         }
         sessions.clear()
+    }
+
+    private companion object {
+        /** Max retained navigation-history depth per session (bounds cyclic forward navigation). */
+        const val MAX_HISTORY = 32
     }
 }
