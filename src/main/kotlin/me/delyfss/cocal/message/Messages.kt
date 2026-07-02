@@ -637,7 +637,13 @@ class Messages(
         ): Messages {
             val supplier = {
                 val file = fileProvider()
-                loadFromFile(file, onCorrupted)
+                val user = loadFromFile(file, onCorrupted)
+                // Auto-fallback: fill keys MISSING from the operator's on-disk file with
+                // the plugin jar's bundled default, so a newly-added message key works
+                // against an older messages file without rewriting or reformatting it.
+                // No plugin (plain fromFile) or no bundled resource → unchanged behavior.
+                val fallback = plugin?.let { bundledDefaultConfig(it, file, logger) }
+                if (fallback != null) user.withFallback(fallback) else user
             }
             val localeSupplier = {
                 val file = fileProvider()
@@ -687,6 +693,26 @@ class Messages(
                 loaded[localeTag] = parsed
             }
             return loaded
+        }
+
+        /**
+         * Parse the plugin jar's bundled copy of [file] (resolved relative to the plugin
+         * data folder, e.g. `messages.conf`) as a fallback Config, or null when it can't
+         * be resolved/read. Lets [createFromFile] deep-fallback keys missing from the
+         * operator's file onto the shipped defaults, without touching that file.
+         */
+        private fun bundledDefaultConfig(plugin: JavaPlugin, file: File, logger: Logger): Config? {
+            val path = runCatching {
+                plugin.dataFolder.toPath().relativize(file.toPath()).toString().replace('\\', '/')
+            }.getOrNull()
+            if (path.isNullOrBlank() || path.startsWith("..")) return null
+            val stream = plugin.getResource(path) ?: return null
+            return try {
+                stream.use { ConfigFactory.parseReader(it.reader(StandardCharsets.UTF_8)) }
+            } catch (e: Exception) {
+                logger.warning("cocal: failed to read bundled default '$path' for fallback: ${e.message}")
+                null
+            }
         }
 
         private fun loadFromFile(

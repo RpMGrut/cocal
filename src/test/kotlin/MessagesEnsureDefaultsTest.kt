@@ -110,6 +110,67 @@ class MessagesEnsureDefaultsTest {
         assertEquals("Bye", parsed.getString("messages.bye"))
     }
 
+    @Test
+    fun `fromFile auto-falls back keys missing on disk to the bundled jar default`() {
+        val resourcesDir = File(tempDir, "resources").apply { mkdirs() }
+        val dataDir = File(tempDir, "data").apply { mkdirs() }
+        val messagesFile = File(dataDir, "messages.conf")
+
+        // Bundled default shipped in the jar: two keys.
+        write(
+            File(resourcesDir, "messages.conf"),
+            """
+            messages {
+              greet = "Default hello"
+              added = "Brand new default"
+            }
+            """
+        )
+        // Operator's OLDER on-disk file: customized `greet`, and MISSING `added`.
+        write(
+            messagesFile,
+            """
+            messages {
+              greet = "Custom hello"
+            }
+            """
+        )
+
+        val messages = Messages.fromFile(
+            plugin = allocatePlugin(dataDir, resourcesDir),
+            fileProvider = { messagesFile },
+            logger = logger,
+            options = Messages.Options()
+        ).also { it.load() }
+
+        // User value wins; the key missing on disk resolves from the bundled default.
+        assertEquals("Custom hello", messages.rawString("greet"))
+        assertEquals("Brand new default", messages.rawString("added"))
+    }
+
+    @Test
+    fun `fromFile without a plugin does not fall back (unchanged behavior)`() {
+        val dataDir = File(tempDir, "data").apply { mkdirs() }
+        val messagesFile = File(dataDir, "messages.conf")
+        write(
+            messagesFile,
+            """
+            messages {
+              greet = "Only key"
+            }
+            """
+        )
+
+        val messages = Messages.fromFile(
+            fileProvider = { messagesFile },
+            logger = logger,
+            options = Messages.Options()
+        ).also { it.load() }
+
+        assertEquals("Only key", messages.rawString("greet"))
+        assertEquals(null, messages.rawString("added")) // no plugin → no bundled fallback source
+    }
+
     private fun allocatePlugin(dataFolder: File, resourcesDir: File): JavaPlugin {
         val field = Unsafe::class.java.getDeclaredField("theUnsafe")
         field.isAccessible = true
